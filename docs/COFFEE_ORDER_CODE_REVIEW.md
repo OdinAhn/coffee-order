@@ -4,7 +4,7 @@
 
 **읽는 법:** 각 코드 블록에는 현재 프로젝트의 **전체 원본 코드 줄이 순서대로 들어 있다.** 설명이 필요한 코드 바로 위에 해당 언어의 주석을 덧붙였다. 따라서 코드와 설명을 한 화면에서 같이 읽을 수 있다. Java·Gradle은 `//`, SQL은 `--`, YAML·설정 파일은 `#`가 올바른 주석 문법이다. **실행 중인 원본 파일은 고치지 않았다.**
 
-Gradle이 자동 생성한 실행 스크립트 `gradlew`, `gradlew.bat`, 바이너리 JAR와 빌드 결과는 제외했다. 기존 `README.md`는 설계 설명이라 중복 복사하지 않았다. 아래에는 사람이 작성한 소스·설정·SQL·테스트 40개 파일을 모두 담았다.
+Gradle이 자동 생성한 실행 스크립트 `gradlew`, `gradlew.bat`, 바이너리 JAR와 빌드 결과는 제외했다. 기존 `README.md`는 설계 설명이라 중복 복사하지 않았다. 아래에는 사람이 작성한 소스·설정·SQL·테스트 41개 파일을 모두 담았다.
 
 ## 코드를 보기 전에: 프로그램이 하는 일
 
@@ -95,14 +95,15 @@ com.example.coffee
 │  ├─ kafka/                         ← Kafka 전송 구현
 │  └─ dto/                           ← 주문 요청·응답·이벤트
 └─ analytics/
-   └─ consumer/                      ← Kafka 메시지 수신
+   ├─ consumer/                      ← Kafka 메시지 수신
+   └─ service/                       ← DB 저장과 중복 처리
 ```
 
 **Controller**는 요청을 받아 입력을 검사하고 HTTP 응답을 돌려준다. **Service**는 실제 일을 한다. 예를 들어 `OrderService`가 잔액을 빼고 주문을 DB에 저장한다. **DTO**는 값을 담아 다른 곳으로 전달한다. 예를 들어 `OrderRequest`는 `userId`와 `menuId`를 담는다. `config`는 프로그램을 켤 때 필요한 Kafka·Redis 설정이다.
 
 컨트롤러에서 SQL을 없앤 이유는 HTTP 처리와 결제 규칙을 분리하기 위해서다. 결제 트랜잭션을 `OrderService`에 두면 여러 입력 방식이 생기더라도 같은 결제 규칙을 사용할 수 있다. `@Transactional`은 Spring이 관리하는 서비스 메서드에 붙여야 DB 작업 전체를 묶는다. 다른 패키지의 클래스가 필요할 때는 파일 위쪽의 `import`가 위치를 알려 준다.
 
-`PopularMenuService`는 MySQL 주문 내역을 읽고 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둔다. `PopularMenuZsetProjection`은 주문 수를 Redis ZSET에 미리 기록하는 별도 작업이므로 `menu/projection`에 둔다. `consumer`, `outbox`, `kafka`는 메시지를 받아들이거나 내보내는 역할을 이름으로 드러낸 패키지다.
+`PopularMenuService`는 MySQL 주문 내역을 읽고 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둔다. `PopularMenuZsetProjection`은 주문 수를 Redis ZSET에 미리 기록하는 별도 작업이므로 `menu/projection`에 둔다. `consumer`, `outbox`, `kafka`는 메시지를 받아들이거나 내보내는 역할을 이름으로 드러낸 패키지다. `AnalyticsConsumer`는 Kafka 메시지를 받고, `AnalyticsService`는 수집 내역을 MySQL에 저장한다. 같은 메시지가 다시 와도 `event_id`가 중복 저장되지 않도록 DB가 검사한다.
 
 패키지를 옮긴 뒤 Kafka 주문 이벤트 DTO는 `order.dto`가 되었다. 그래서 JSON 역직렬화가 신뢰하는 패키지도 바꿨다. Redis의 옛 메뉴 캐시 객체와 섞이지 않도록 캐시 이름은 `menus-v2`를 사용한다.
 
@@ -1301,35 +1302,61 @@ public class OutboxScheduler {
 // 이 파일은 analytics 기능의 consumer 패키지에 속합니다.
 package com.example.coffee.analytics.consumer;
 
+import com.example.coffee.analytics.service.AnalyticsService;
 import com.example.coffee.order.dto.OrderEvent;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 @Component
 public class AnalyticsConsumer {
-    private final JdbcTemplate jdbc;
+    // Kafka에서 받은 메시지의 저장 작업은 서비스에 맡깁니다.
+    private final AnalyticsService analytics;
 
-    public AnalyticsConsumer(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public AnalyticsConsumer(AnalyticsService analytics) {
+        this.analytics = analytics;
     }
 
     // Kafka의 orders.paid 메시지가 오면 이 함수를 실행합니다. concurrency=3은 소비자 세 개를 뜻합니다.
     @KafkaListener(topics = "${orders.topic}", groupId = "coffee-analytics", concurrency = "3")
-    // 수집 결과를 DB에 저장하는 작업을 한 묶음으로 처리합니다.
+    public void collect(OrderEvent event) {
+        // 서비스가 DB에 저장한 뒤 돌아오므로, 저장 실패가 Kafka 처리 실패로 이어집니다.
+        analytics.collect(event);
+    }
+}
+```
+
+### 36. `src/main/java/com/example/coffee/analytics/service/AnalyticsService.java`
+
+```java
+// 이 파일은 analytics 기능의 service 패키지에 속합니다.
+package com.example.coffee.analytics.service;
+
+import com.example.coffee.order.dto.OrderEvent;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class AnalyticsService {
+    private final JdbcTemplate jdbc;
+
+    public AnalyticsService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    // 메시지 한 건의 저장을 DB 트랜잭션으로 처리합니다. 실패하면 저장 결과를 취소합니다.
     @Transactional
     public void collect(OrderEvent event) {
-        // 메시지 내용을 실습용 수집 표에 저장합니다.
+        // 사용자·메뉴·결제액을 실습용 수집 테이블에 보관합니다.
         jdbc.update("INSERT INTO collected_order_events(event_id, order_id, user_id, menu_id, paid_amount) " +
-                        // 같은 event_id가 다시 오면 의미 없는 갱신만 합니다. 수집 결과를 두 번 세지 않습니다.
+                        // 이미 저장한 event_id가 다시 와도 행을 추가하지 않습니다.
                         "VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE event_id = event_id",
                 event.eventId(), event.orderId(), event.userId(), event.menuId(), event.paidAmount());
     }
 }
 ```
 
-### 36. `src/test/resources/application.yml`
+### 37. `src/test/resources/application.yml`
 
 ```yaml
 spring:
@@ -1365,7 +1392,7 @@ popularity:
     enabled: false
 ```
 
-### 37. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
+### 38. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
 
 ```java
 package com.example.coffee;
@@ -1746,7 +1773,7 @@ class CoffeeOrderIntegrationTest {
 }
 ```
 
-### 38. `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java`
+### 39. `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java`
 
 ```java
 package com.example.coffee.order.kafka;
@@ -1793,7 +1820,7 @@ class KafkaOrderEventSenderTest {
 }
 ```
 
-### 39. `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java`
+### 40. `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java`
 
 ```java
 package com.example.coffee.menu.service;
@@ -1826,7 +1853,7 @@ class MenuCacheFailureTest {
 }
 ```
 
-### 40. `.gitignore`
+### 41. `.gitignore`
 
 ```text
 # 빌드 도구가 만든 임시 파일은 Git에 올리지 않습니다.
@@ -1897,7 +1924,8 @@ out/
 | `src/main/java/com/example/coffee/order/kafka/KafkaOrderEventSender.java` | `4e565a15671992cce2f095447471aac2eb8a99f1c31cf0ff525e91b589443de4` |
 | `src/main/java/com/example/coffee/order/outbox/OutboxPublisher.java` | `780b4f3a36e34c29623dddc49bd89514eff4a0268f9fa64faa52156b42808d0d` |
 | `src/main/java/com/example/coffee/order/outbox/OutboxScheduler.java` | `12f087b0f2c41fc3eecffc4a42707f4b8183f28f01b6adc1c3f2bf4ed1526361` |
-| `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java` | `54a5b2dbe2969ff74b5f7e9eb15bb1facb386656a209edd357ad84394c0e03d8` |
+| `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java` | `eb5657a8ab621e1633aa063f51d3d6c4df2399ccf96ddae508dfd1fbbe2913f7` |
+| `src/main/java/com/example/coffee/analytics/service/AnalyticsService.java` | `517ea8aef15188989fc3b9b8e34da05499cbe7a6f27cb68ab3861d70fdd51204` |
 | `src/test/resources/application.yml` | `f9fdb52e73a6156063fb5fc61719bb11ec8d8983579e276421b06576e95404a9` |
 | `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java` | `727235c6320f5b6508f06c22e5697345f0adb54d0bb4a7d5148b7a7228723a4e` |
 | `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java` | `cf392a5dd60225e9c1e50f9e9b3d83708a73837a3eb86d7d14669c8f1cfb2d42` |

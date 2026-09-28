@@ -43,10 +43,11 @@ com.example.coffee
 │  ├─ kafka/         Kafka 전송 구현
 │  └─ dto/           주문 요청·응답·이벤트
 └─ analytics/
-   └─ consumer/      Kafka 이벤트 수신
+   ├─ consumer/      Kafka 이벤트 수신
+   └─ service/       수집 기록의 DB 저장·중복 처리
 ```
 
-`PopularMenuService`는 MySQL 주문 내역에서 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둡니다. `PopularMenuZsetProjection`은 Redis ZSET에 주문 횟수를 기록하는 별도 역할이므로 `menu/projection`에 둡니다. Kafka 수신·전송과 outbox 작업도 각각 역할을 드러내는 패키지에 둡니다.
+`PopularMenuService`는 MySQL 주문 내역에서 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둡니다. `PopularMenuZsetProjection`은 Redis ZSET에 주문 횟수를 기록하는 별도 역할이므로 `menu/projection`에 둡니다. Kafka 수신·전송과 outbox 작업도 각각 역할을 드러내는 패키지에 둡니다. `AnalyticsConsumer`는 Kafka 메시지를 받아 `AnalyticsService`에 전달하고, 서비스는 DB 저장과 중복 처리를 트랜잭션으로 수행합니다.
 
 Spring Boot 시작 클래스를 상위 패키지에 두어 하위 패키지가 컴포넌트 스캔 대상이 됩니다. 주문 이벤트 DTO가 `order.dto`로 이동해 Kafka JSON 역직렬화의 신뢰 패키지도 변경했습니다. Redis에 남은 이전 메뉴 객체와 충돌하지 않도록 메뉴 캐시 이름은 `menus-v2`를 사용합니다.
 
