@@ -1,0 +1,35 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: coffee
+      MYSQL_USER: coffee
+      MYSQL_PASSWORD: coffee
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -proot"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:4.1.2
+    ports:
+      - "9092:9092"
+
+  redis:
+    image: redis:7.4.11-alpine3.21
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mysql_data:
