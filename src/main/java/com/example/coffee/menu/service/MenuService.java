@@ -1,5 +1,6 @@
-package com.example.coffee;
+package com.example.coffee.menu.service;
 
+import com.example.coffee.menu.dto.Menu;
 import java.util.List;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -13,7 +14,7 @@ public class MenuService {
         this.jdbc = jdbc;
     }
 
-    @Cacheable(cacheNames = "menus", key = "'all'")
+    @Cacheable(cacheNames = "menus-v2", key = "'all'")
     public List<Menu> list() {
         return jdbc.query("SELECT id, name, price FROM menus ORDER BY id",
                 (rs, rowNum) -> Menu.builder().id(rs.getLong("id"))

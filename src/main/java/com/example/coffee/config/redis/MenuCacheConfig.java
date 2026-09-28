@@ -1,4 +1,4 @@
-package com.example.coffee;
+package com.example.coffee.config.redis;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

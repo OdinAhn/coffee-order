@@ -1,5 +1,7 @@
-package com.example.coffee;
+package com.example.coffee.order.kafka;
 
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -11,9 +13,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 
 class KafkaOrderEventSenderTest {
     @SuppressWarnings("unchecked")
-    private final KafkaTemplate<String, OrderEventSender.OrderEvent> kafka = mock(KafkaTemplate.class);
+    private final KafkaTemplate<String, OrderEvent> kafka = mock(KafkaTemplate.class);
     private final KafkaOrderEventSender sender = new KafkaOrderEventSender(kafka, "orders.paid");
-    private final OrderEventSender.OrderEvent event = OrderEventSender.OrderEvent.builder()
+    private final OrderEvent event = OrderEvent.builder()
             .eventId(7).orderId(8).userId(9).menuId(10).paidAmount(4500).build();
 
     @Test

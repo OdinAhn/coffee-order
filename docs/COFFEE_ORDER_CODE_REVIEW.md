@@ -4,7 +4,7 @@
 
 **읽는 법:** 각 코드 블록에는 현재 프로젝트의 **전체 원본 코드 줄이 순서대로 들어 있다.** 설명이 필요한 코드 바로 위에 해당 언어의 주석을 덧붙였다. 따라서 코드와 설명을 한 화면에서 같이 읽을 수 있다. Java·Gradle은 `//`, SQL은 `--`, YAML·설정 파일은 `#`가 올바른 주석 문법이다. **실행 중인 원본 파일은 고치지 않았다.**
 
-Gradle이 자동 생성한 실행 스크립트 `gradlew`, `gradlew.bat`, 바이너리 JAR와 빌드 결과는 제외했다. 기존 `README.md`는 설계 설명이라 중복 복사하지 않았다. 아래에는 사람이 작성한 소스·설정·SQL·테스트 30개 파일을 모두 담았다.
+Gradle이 자동 생성한 실행 스크립트 `gradlew`, `gradlew.bat`, 바이너리 JAR와 빌드 결과는 제외했다. 기존 `README.md`는 설계 설명이라 중복 복사하지 않았다. 아래에는 사람이 작성한 소스·설정·SQL·테스트 40개 파일을 모두 담았다.
 
 ## 코드를 보기 전에: 프로그램이 하는 일
 
@@ -66,9 +66,50 @@ DB에는 주문이 저장됐는데 Kafka에 보내기 직전 서버가 꺼질 �
 
 ZSET은 각 메뉴에 주문 횟수 점수를 붙인 Redis 자료형이다. 10초마다 MySQL 주문을 다시 세어 복사하므로 그 사이에는 숫자가 이전 값일 수 있다. 따라서 `GET /api/menus/popular`은 MySQL을 직접 조회한다. 또한 “최근 7일”은 시간이 지나면서 오래된 주문이 빠져야 하므로 새 주문마다 점수를 1씩 올리는 방식만으로는 정확하지 않다.
 
+## 기능과 역할에 따라 패키지를 나눈 이유
+
+**패키지(package)**는 관련 Java 파일을 넣는 폴더이자 이름이다. 먼저 `menu`, `point`, `order`, `analytics`라는 **기능**으로 나누고, 각 기능 안에서 역할에 따라 `controller`, `service`, `dto` 등으로 한 번 더 나눴다.
+
+```text
+com.example.coffee
+├─ CoffeeOrderApplication.java        ← 프로그램 시작
+├─ common/
+│  ├─ dto/                           ← 공통 오류 응답 모양
+│  └─ error/                         ← 공통 오류 처리
+├─ config/
+│  ├─ kafka/                         ← Kafka 토픽 설정
+│  └─ redis/                         ← Redis 캐시 오류 처리
+├─ menu/
+│  ├─ controller/                    ← 메뉴 HTTP 주소
+│  ├─ service/                       ← 메뉴 조회·정확한 7일 인기 집계
+│  ├─ projection/                    ← Redis ZSET에 주문 횟수 기록
+│  └─ dto/                           ← 메뉴 데이터를 담는 객체
+├─ point/
+│  ├─ controller/                    ← 충전 HTTP 주소
+│  ├─ service/                       ← 잔액 충전 SQL과 트랜잭션
+│  └─ dto/                           ← 충전 요청·응답
+├─ order/
+│  ├─ controller/                    ← 주문 HTTP 주소
+│  ├─ service/                       ← 결제 규칙과 이벤트 발행 약속
+│  ├─ outbox/                        ← DB 기록을 Kafka로 옮기는 작업
+│  ├─ kafka/                         ← Kafka 전송 구현
+│  └─ dto/                           ← 주문 요청·응답·이벤트
+└─ analytics/
+   └─ consumer/                      ← Kafka 메시지 수신
+```
+
+**Controller**는 요청을 받아 입력을 검사하고 HTTP 응답을 돌려준다. **Service**는 실제 일을 한다. 예를 들어 `OrderService`가 잔액을 빼고 주문을 DB에 저장한다. **DTO**는 값을 담아 다른 곳으로 전달한다. 예를 들어 `OrderRequest`는 `userId`와 `menuId`를 담는다. `config`는 프로그램을 켤 때 필요한 Kafka·Redis 설정이다.
+
+컨트롤러에서 SQL을 없앤 이유는 HTTP 처리와 결제 규칙을 분리하기 위해서다. 결제 트랜잭션을 `OrderService`에 두면 여러 입력 방식이 생기더라도 같은 결제 규칙을 사용할 수 있다. `@Transactional`은 Spring이 관리하는 서비스 메서드에 붙여야 DB 작업 전체를 묶는다. 다른 패키지의 클래스가 필요할 때는 파일 위쪽의 `import`가 위치를 알려 준다.
+
+`PopularMenuService`는 MySQL 주문 내역을 읽고 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둔다. `PopularMenuZsetProjection`은 주문 수를 Redis ZSET에 미리 기록하는 별도 작업이므로 `menu/projection`에 둔다. `consumer`, `outbox`, `kafka`는 메시지를 받아들이거나 내보내는 역할을 이름으로 드러낸 패키지다.
+
+패키지를 옮긴 뒤 Kafka 주문 이벤트 DTO는 `order.dto`가 되었다. 그래서 JSON 역직렬화가 신뢰하는 패키지도 바꿨다. Redis의 옛 메뉴 캐시 객체와 섞이지 않도록 캐시 이름은 `menus-v2`를 사용한다.
+
 ## 전체 코드: 설명은 해당 줄 바로 위에 있다
 
 다음 코드 블록의 원본 줄은 파일과 같은 순서다. 설명 주석은 읽는 데 도움을 주려고 **복사본에만** 삽입했다. 각 파일의 역할을 이해하고 다음 파일로 넘어가자.
+
 
 ### 1. `settings.gradle`
 
@@ -222,8 +263,9 @@ spring:
       # 처음 소비하는 그룹이라 읽은 위치 기록이 없으면 가장 오래된 메시지부터 읽습니다.
       auto-offset-reset: earliest
       properties:
+        # 주문 이벤트 DTO가 옮겨진 새 패키지에서 Kafka JSON 객체를 읽습니다.
         # JSON 메시지를 Java 객체로 바꿀 때 허용할 코드 패키지를 제한합니다.
-        spring.json.trusted.packages: com.example.coffee
+        spring.json.trusted.packages: com.example.coffee.order.dto
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
@@ -241,8 +283,8 @@ spring:
       timeout: 2s
   cache:
     type: redis
-    # 메뉴 목록 캐시의 이름을 menus로 정합니다.
-    cache-names: menus
+    # 이전 메뉴 객체를 담은 Redis 캐시와 새 DTO 패키지의 캐시를 분리합니다.
+    cache-names: menus-v2
     redis:
       # 캐시 값을 5분 뒤 만료시킵니다. 만료되면 다음 조회에서 MySQL을 다시 읽습니다.
       time-to-live: 5m
@@ -363,89 +405,35 @@ public class CoffeeOrderApplication {
 }
 ```
 
-### 10. `src/main/java/com/example/coffee/Menu.java`
+### 10. `src/main/java/com/example/coffee/config/kafka/OrderTopicConfig.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 config 기능의 kafka 패키지에 속합니다.
+package com.example.coffee.config.kafka;
 
-import java.io.Serializable;
-import lombok.Builder;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.TopicBuilder;
 
-// 객체를 만들 때 Menu.builder().id(...).name(...).price(...).build()처럼 각 값의 이름을 적을 수 있습니다.
-@Builder
-// record는 데이터 묶음입니다. 메뉴 ID, 이름, 가격을 함께 다니게 합니다.
-// 메뉴 객체를 Redis 캐시에 저장할 수 있도록 바이트 형태로 바꾸는 기능을 허용합니다.
-public record Menu(long id, String name, long price) implements Serializable {}
-```
-
-### 11. `src/main/java/com/example/coffee/MenuController.java`
-
-```java
-package com.example.coffee;
-
-import java.util.List;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-// HTTP 요청을 받는 클래스입니다. 반환한 Java 객체는 보통 JSON으로 바뀝니다.
-@RestController
-// 이 클래스의 주소 앞부분을 /api/menus로 정합니다.
-@RequestMapping("/api/menus")
-public class MenuController {
-    // final은 이 참조를 생성자에서 받은 뒤 다른 객체로 바꾸지 않겠다는 뜻입니다.
-    private final MenuService menus;
-
-    // Spring이 MenuService를 만들어 생성자에 전달합니다. 이를 생성자 주입이라고 합니다.
-    public MenuController(MenuService menus) {
-        this.menus = menus;
-    }
-
-    // GET /api/menus 요청이 아래 list() 함수를 실행합니다.
-    @GetMapping
-    public ResponseEntity<List<Menu>> list() {
-        // 조회 성공 상태 200과 메뉴 목록을 함께 반환합니다. 꺾쇠 안 List<Menu>는 응답 내용의 타입입니다.
-        return ResponseEntity.ok(menus.list());
+// Spring 설정을 담은 클래스입니다.
+@Configuration
+public class OrderTopicConfig {
+    @Bean
+    NewTopic orderPaidTopic(@Value("${orders.topic}") String topic) {
+        // 하나의 Kafka 토픽을 세 갈래로 나눠 소비자 세 개가 동시에 처리할 수 있게 합니다.
+        // 브로커가 한 대인 연습 환경이라 복제본은 하나입니다. 장애에 안전한 운영 구성을 뜻하지는 않습니다.
+        return TopicBuilder.name(topic).partitions(3).replicas(1).build();
     }
 }
 ```
 
-### 12. `src/main/java/com/example/coffee/MenuService.java`
+### 11. `src/main/java/com/example/coffee/config/redis/MenuCacheConfig.java`
 
 ```java
-package com.example.coffee;
-
-import java.util.List;
-import org.springframework.cache.annotation.Cacheable;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-
-// Controller가 사용할 실제 메뉴 조회 기능을 가진 Spring 객체라는 표시입니다.
-@Service
-public class MenuService {
-    private final JdbcTemplate jdbc;
-
-    public MenuService(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    // 같은 메뉴 목록을 이미 Redis에서 찾으면 아래 SQL을 다시 실행하지 않고 그 값을 돌려줍니다.
-    @Cacheable(cacheNames = "menus", key = "'all'")
-    public List<Menu> list() {
-        // SQL로 DB 행을 읽습니다. ?가 없는 고정 메뉴 조회이고, 각 행을 아래의 Menu 객체로 바꿉니다.
-        return jdbc.query("SELECT id, name, price FROM menus ORDER BY id",
-                // rs는 지금 읽은 DB 한 행입니다. 그 행의 id, name, price를 꺼내 Menu를 만듭니다.
-                (rs, rowNum) -> Menu.builder().id(rs.getLong("id"))
-                        .name(rs.getString("name")).price(rs.getLong("price")).build());
-    }
-}
-```
-
-### 13. `src/main/java/com/example/coffee/MenuCacheConfig.java`
-
-```java
-package com.example.coffee;
+// 이 파일은 config 기능의 redis 패키지에 속합니다.
+package com.example.coffee.config.redis;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -491,201 +479,24 @@ public class MenuCacheConfig implements CachingConfigurer {
 }
 ```
 
-### 14. `src/main/java/com/example/coffee/PointController.java`
+### 12. `src/main/java/com/example/coffee/common/dto/ErrorResponse.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 common 기능의 dto 패키지에 속합니다.
+package com.example.coffee.common.dto;
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
 import lombok.Builder;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 
-@RestController
-// 이 클래스의 주소 앞부분은 /api/points입니다.
-@RequestMapping("/api/points")
-public class PointController {
-    private final JdbcTemplate jdbc;
-
-    public PointController(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    // POST /api/points/charges 요청이 충전 함수를 실행합니다.
-    @PostMapping("/charges")
-    // 아래 DB 작업들을 하나의 묶음으로 처리합니다. 중간에 실패하면 모두 취소(롤백)합니다.
-    @Transactional
-    // JSON 본문을 ChargeRequest로 바꾸고 @Min, @Max 규칙을 검사합니다.
-    public ResponseEntity<ChargeResponse> charge(@Valid @RequestBody ChargeRequest request) {
-        // 처음 충전하는 사용자면 잔액 0인 계정을 먼저 만듭니다.
-        jdbc.update("INSERT INTO point_accounts(user_id, balance) VALUES (?, 0) " +
-                        // 이미 계정이 있으면 새 계정을 만들지 않고 그대로 둡니다. 동시에 첫 충전이 들어올 때도 도움이 됩니다.
-                        "ON DUPLICATE KEY UPDATE user_id = user_id",
-                request.userId());
-        // 현재 잔액에 충전액을 DB 안에서 더합니다. 두 요청이 동시에 와도 옛 잔액을 덮어써 충전을 잃지 않습니다.
-        int updated = jdbc.update("UPDATE point_accounts SET balance = balance + ? " +
-                        // 더하기 전에 최대 잔액을 넘는지 검사합니다. ?에는 메서드의 금액 값이 안전하게 들어갑니다.
-                        "WHERE user_id = ? AND balance <= 1000000000000 - ?",
-                request.amount(), request.userId(), request.amount());
-        // 조건에 맞는 행을 바꾸지 못했다면 한도를 넘는 충전입니다. 409 오류를 보냅니다.
-        if (updated == 0) {
-            throw new ApiException(HttpStatus.CONFLICT, "POINT_LIMIT_EXCEEDED", "Point balance limit exceeded");
-        }
-        // 충전 뒤 최종 잔액을 읽어 응답에 넣습니다.
-        Long balance = jdbc.queryForObject("SELECT balance FROM point_accounts WHERE user_id = ?",
-                Long.class, request.userId());
-        return ResponseEntity.ok(ChargeResponse.builder()
-                .userId(request.userId()).balance(balance).build());
-    }
-
-    @Builder
-    // 사용자 ID와 금액은 양수여야 합니다. 충전액에는 최대값도 둡니다.
-    public record ChargeRequest(@Min(1) long userId, @Min(1) @Max(1000000000000L) long amount) {}
-    @Builder
-    // 응답에는 사용자 ID와 새 잔액만 담습니다. 충전 POST를 재시도하면 다시 충전될 수 있다는 점은 별도로 기억하세요.
-    public record ChargeResponse(long userId, long balance) {}
-}
+@Builder
+// 오류 응답에 들어갈 코드와 설명을 담습니다. Controller의 오류 형식을 일정하게 만듭니다.
+public record ErrorResponse(String code, String message) {}
 ```
 
-### 15. `src/main/java/com/example/coffee/OrderController.java`
+### 13. `src/main/java/com/example/coffee/common/error/ApiException.java`
 
 ```java
-package com.example.coffee;
-
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
-import java.sql.PreparedStatement;
-import java.sql.Statement;
-import java.sql.Timestamp;
-import java.time.Clock;
-import java.time.Instant;
-import lombok.Builder;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
-import org.springframework.jdbc.support.KeyHolder;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-@RestController
-// 주문 API의 공통 주소는 /api/orders입니다.
-@RequestMapping("/api/orders")
-public class OrderController {
-    // JdbcTemplate은 Java에서 SQL을 실행하게 해 주는 Spring 도구입니다.
-    private final JdbcTemplate jdbc;
-    private final Clock clock;
-
-    public OrderController(JdbcTemplate jdbc, Clock clock) {
-        this.jdbc = jdbc;
-        this.clock = clock;
-    }
-
-    @PostMapping
-    // 잔액 차감, 주문 저장, outbox 저장이 함께 성공하거나 함께 취소되게 합니다. 이것이 결제의 핵심입니다.
-    @Transactional
-    public ResponseEntity<OrderResponse> place(@Valid @RequestBody OrderRequest request,
-                                               // 같은 결제를 다시 시도할 때 클라이언트가 같은 Idempotency-Key를 보냅니다. 새 주문이면 새 키를 씁니다.
-                                               @RequestHeader("Idempotency-Key") String requestKey) {
-        // 키가 공백뿐이거나 너무 길면 먼저 400 오류로 거절합니다.
-        if (requestKey.isBlank() || requestKey.length() > 128) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
-                    "Idempotency-Key must contain 1 to 128 characters");
-        }
-        // 가격은 사용자가 보내지 않고 서버가 DB에서 읽습니다. 사용자가 가격을 낮춰 보내는 일을 막습니다.
-        Long price = jdbc.query("SELECT price FROM menus WHERE id = ?",
-                rs -> rs.next() ? rs.getLong(1) : null, request.menuId());
-        // 없는 메뉴 ID라면 결제하지 않고 404 오류를 돌려줍니다.
-        if (price == null) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "MENU_NOT_FOUND", "Menu does not exist");
-        }
-        // 이 사용자의 잔액 행을 잠급니다. 다른 서버가 같은 사용자의 결제를 동시에 진행하면 여기서 기다립니다.
-        Long balance = jdbc.query("SELECT balance FROM point_accounts WHERE user_id = ? FOR UPDATE",
-                rs -> rs.next() ? rs.getLong(1) : null, request.userId());
-        // 충전한 계정이 아직 없다면 결제할 포인트가 없으므로 409 오류를 냅니다.
-        if (balance == null) {
-            throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
-        }
-        OrderResponse previous = jdbc.query(
-                // 이 키로 이미 결제했는지 DB에서 확인합니다. FOR UPDATE는 앞선 서버가 방금 끝낸 주문을 제대로 보도록 돕습니다.
-                "SELECT id, menu_id, paid_amount, ordered_at FROM orders WHERE user_id = ? AND request_key = ? FOR UPDATE",
-                rs -> rs.next() ? OrderResponse.builder()
-                        .orderId(rs.getLong("id")).userId(request.userId())
-                        .menuId(rs.getLong("menu_id")).paidAmount(rs.getLong("paid_amount"))
-                        .orderedAt(rs.getTimestamp("ordered_at").toInstant()).build() : null,
-                request.userId(), requestKey);
-        // 예전 주문을 찾았다면 아래에서는 잔액을 다시 빼지 않습니다.
-        if (previous != null) {
-            // 같은 키로 다른 메뉴를 주문하는 것은 모순이므로 409 오류를 냅니다.
-            if (previous.menuId() != request.menuId()) {
-                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
-                        "Idempotency-Key was already used for another menu");
-            }
-            // 같은 키와 메뉴면 전에 만든 주문 ID, 금액, 시각을 그대로 다시 반환합니다.
-            return ResponseEntity.status(HttpStatus.CREATED).body(previous);
-        }
-        // 현재 잔액에서 메뉴 가격을 DB 안에서 뺍니다.
-        int debited = jdbc.update("UPDATE point_accounts SET balance = balance - ? " +
-                        // 돈이 충분할 때만 빼는 조건을 같은 UPDATE 문장에 둡니다. 동시 요청이 잔액보다 많이 쓰는 것을 막습니다.
-                        "WHERE user_id = ? AND balance >= ?", price, request.userId(), price);
-        // 차감한 행이 없다면 잔액 부족입니다. 예외가 발생하고 이 트랜잭션은 취소됩니다.
-        if (debited == 0) {
-            throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
-        }
-
-        // 주문 시각을 한 번 정합니다. 주문 행과 outbox가 같은 기준 시각을 사용합니다.
-        Instant now = clock.instant();
-        // DB가 자동으로 만든 주문 번호를 받아올 빈 상자입니다.
-        KeyHolder key = new GeneratedKeyHolder();
-        jdbc.update(connection -> {
-            PreparedStatement statement = connection.prepareStatement(
-                    // 결제한 주문을 저장합니다. request_key도 함께 저장해야 다음 재시도를 알아볼 수 있습니다.
-                    "INSERT INTO orders(user_id, menu_id, paid_amount, ordered_at, request_key) VALUES (?, ?, ?, ?, ?)",
-                    Statement.RETURN_GENERATED_KEYS);
-            statement.setLong(1, request.userId());
-            statement.setLong(2, request.menuId());
-            // ? 자리에 DB에서 읽은 실제 가격을 넣습니다. 문자열을 직접 이어 붙이지 않는 방식입니다.
-            statement.setLong(3, price);
-            statement.setTimestamp(4, Timestamp.from(now));
-            statement.setString(5, requestKey);
-            return statement;
-        }, key);
-        // 방금 DB가 만든 주문 ID를 꺼냅니다.
-        long orderId = key.getKey().longValue();
-        // Kafka에 보낼 내용을 DB에 먼저 기록합니다. 주문과 같은 트랜잭션이므로 결제만 되고 발행 기록이 없는 상태를 줄입니다.
-        jdbc.update("INSERT INTO order_outbox(order_id, user_id, menu_id, paid_amount, next_attempt_at) " +
-                "VALUES (?, ?, ?, ?, ?)", orderId, request.userId(), request.menuId(), price, Timestamp.from(now));
-        // 새 결제와 같은 키 재시도 모두 201을 보냅니다. 재시도에서는 원래 주문의 정보를 돌려줍니다.
-        return ResponseEntity.status(HttpStatus.CREATED).body(OrderResponse.builder()
-                .orderId(orderId).userId(request.userId()).menuId(request.menuId())
-                .paidAmount(price).orderedAt(now).build());
-    }
-
-    @Builder
-    // 요청 JSON의 사용자 ID와 메뉴 ID를 담는 단순한 자료형입니다.
-    public record OrderRequest(@Min(1) long userId, @Min(1) long menuId) {}
-    @Builder
-    // 주문 성공 JSON에 넣을 값을 묶습니다.
-    public record OrderResponse(long orderId, long userId, long menuId, long paidAmount, Instant orderedAt) {}
-}
-```
-
-### 16. `src/main/java/com/example/coffee/ApiException.java`
-
-```java
-package com.example.coffee;
+// 이 파일은 common 기능의 error 패키지에 속합니다.
+package com.example.coffee.common.error;
 
 import org.springframework.http.HttpStatus;
 
@@ -713,12 +524,13 @@ public class ApiException extends RuntimeException {
 }
 ```
 
-### 17. `src/main/java/com/example/coffee/ApiErrorHandler.java`
+### 14. `src/main/java/com/example/coffee/common/error/ApiErrorHandler.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 common 기능의 error 패키지에 속합니다.
+package com.example.coffee.common.error;
 
-import lombok.Builder;
+import com.example.coffee.common.dto.ErrorResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -760,25 +572,84 @@ public class ApiErrorHandler {
                         .message("Request body is invalid").build());
     }
 
-    @Builder
-    // 모든 오류 응답을 code와 message 두 값으로 통일합니다.
-    record ErrorResponse(String code, String message) {}
 }
 ```
 
-### 18. `src/main/java/com/example/coffee/PopularMenuController.java`
+### 15. `src/main/java/com/example/coffee/menu/dto/Menu.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 menu 기능의 dto 패키지에 속합니다.
+package com.example.coffee.menu.dto;
 
-import java.time.Clock;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.List;
-import java.sql.Timestamp;
+import java.io.Serializable;
 import lombok.Builder;
+
+// 객체를 만들 때 Menu.builder().id(...).name(...).price(...).build()처럼 각 값의 이름을 적을 수 있습니다.
+@Builder
+// record는 데이터 묶음입니다. 메뉴 ID, 이름, 가격을 함께 다니게 합니다.
+// 메뉴 객체를 Redis 캐시에 저장할 수 있도록 바이트 형태로 바꾸는 기능을 허용합니다.
+public record Menu(long id, String name, long price) implements Serializable {}
+```
+
+### 16. `src/main/java/com/example/coffee/menu/dto/PopularMenu.java`
+
+```java
+// 이 파일은 menu 기능의 dto 패키지에 속합니다.
+package com.example.coffee.menu.dto;
+
+import lombok.Builder;
+
+@Builder
+// 메뉴 이름·가격과 최근 주문 횟수를 함께 담아 API 응답으로 보냅니다.
+public record PopularMenu(long menuId, String name, long price, long orderCount) {}
+```
+
+### 17. `src/main/java/com/example/coffee/menu/controller/MenuController.java`
+
+```java
+// 이 파일은 menu 기능의 controller 패키지에 속합니다.
+package com.example.coffee.menu.controller;
+
+import com.example.coffee.menu.dto.Menu;
+import com.example.coffee.menu.service.MenuService;
+import java.util.List;
 import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+// HTTP 요청을 받는 클래스입니다. 반환한 Java 객체는 보통 JSON으로 바뀝니다.
+@RestController
+// 이 클래스의 주소 앞부분을 /api/menus로 정합니다.
+@RequestMapping("/api/menus")
+public class MenuController {
+    // final은 이 참조를 생성자에서 받은 뒤 다른 객체로 바꾸지 않겠다는 뜻입니다.
+    private final MenuService menus;
+
+    // Spring이 MenuService를 만들어 생성자에 전달합니다. 이를 생성자 주입이라고 합니다.
+    public MenuController(MenuService menus) {
+        this.menus = menus;
+    }
+
+    // GET /api/menus 요청이 아래 list() 함수를 실행합니다.
+    @GetMapping
+    public ResponseEntity<List<Menu>> list() {
+        // 조회 성공 상태 200과 메뉴 목록을 함께 반환합니다. 꺾쇠 안 List<Menu>는 응답 내용의 타입입니다.
+        return ResponseEntity.ok(menus.list());
+    }
+}
+```
+
+### 18. `src/main/java/com/example/coffee/menu/controller/PopularMenuController.java`
+
+```java
+// 이 파일은 menu 기능의 controller 패키지에 속합니다.
+package com.example.coffee.menu.controller;
+
+import com.example.coffee.menu.dto.PopularMenu;
+import com.example.coffee.menu.service.PopularMenuService;
+import java.util.List;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -787,20 +658,85 @@ import org.springframework.web.bind.annotation.RestController;
 // GET /api/menus/popular로 최근 인기 메뉴를 조회합니다.
 @RequestMapping("/api/menus/popular")
 public class PopularMenuController {
-    private final JdbcTemplate jdbc;
-    private final Clock clock;
+    // 실제 DB 집계는 Service에 맡기고 Controller는 HTTP 요청과 응답만 처리합니다.
+    private final PopularMenuService popularMenus;
 
-    public PopularMenuController(JdbcTemplate jdbc, Clock clock) {
-        this.jdbc = jdbc;
-        this.clock = clock;
+    public PopularMenuController(PopularMenuService popularMenus) {
+        this.popularMenus = popularMenus;
     }
 
     @GetMapping
     public ResponseEntity<List<PopularMenu>> list() {
+        // Service에서 받은 결과를 HTTP 200과 함께 반환합니다.
+        return ResponseEntity.ok(popularMenus.list());
+    }
+}
+```
+
+### 19. `src/main/java/com/example/coffee/menu/service/MenuService.java`
+
+```java
+// 이 파일은 menu 기능의 service 패키지에 속합니다.
+package com.example.coffee.menu.service;
+
+import com.example.coffee.menu.dto.Menu;
+import java.util.List;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+
+// Controller가 사용할 실제 메뉴 조회 기능을 가진 Spring 객체라는 표시입니다.
+@Service
+public class MenuService {
+    private final JdbcTemplate jdbc;
+
+    public MenuService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    // 같은 메뉴 목록을 이미 Redis에서 찾으면 아래 SQL을 다시 실행하지 않고 그 값을 돌려줍니다.
+    @Cacheable(cacheNames = "menus-v2", key = "'all'")
+    public List<Menu> list() {
+        // SQL로 DB 행을 읽습니다. ?가 없는 고정 메뉴 조회이고, 각 행을 아래의 Menu 객체로 바꿉니다.
+        return jdbc.query("SELECT id, name, price FROM menus ORDER BY id",
+                // rs는 지금 읽은 DB 한 행입니다. 그 행의 id, name, price를 꺼내 Menu를 만듭니다.
+                (rs, rowNum) -> Menu.builder().id(rs.getLong("id"))
+                        .name(rs.getString("name")).price(rs.getLong("price")).build());
+    }
+}
+```
+
+### 20. `src/main/java/com/example/coffee/menu/service/PopularMenuService.java`
+
+```java
+// 이 파일은 menu 기능의 service 패키지에 속합니다.
+package com.example.coffee.menu.service;
+
+import com.example.coffee.menu.dto.PopularMenu;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PopularMenuService {
+    private final JdbcTemplate jdbc;
+    private final Clock clock;
+
+    public PopularMenuService(JdbcTemplate jdbc, Clock clock) {
+        this.jdbc = jdbc;
+        this.clock = clock;
+    }
+
+    // DB의 결제 완료 주문을 최근 7일 범위로 묶어 정확한 인기 메뉴를 계산합니다.
+    public List<PopularMenu> list() {
         // 지금 시각을 한 번만 읽어 7일의 시작과 끝을 같은 기준으로 계산합니다.
         Instant now = clock.instant();
-        // 실제로 결제가 끝난 orders 행을 세기 때문에 정확한 주문 횟수를 얻습니다.
-        List<PopularMenu> menus = jdbc.query("SELECT m.id, m.name, m.price, COUNT(o.id) AS order_count " +
+        // COUNT는 DB 행의 개수를 셉니다. 주문 한 행이 메뉴 주문 한 번입니다.
+        return jdbc.query("SELECT m.id, m.name, m.price, COUNT(o.id) AS order_count " +
                         // 주문 표와 메뉴 표를 연결해 메뉴 이름과 가격도 함께 가져옵니다.
                         "FROM orders o JOIN menus m ON m.id = o.menu_id " +
                         "WHERE o.ordered_at >= ? AND o.ordered_at <= ? " +
@@ -814,18 +750,15 @@ public class PopularMenuController {
                         .orderCount(rs.getLong("order_count")).build(),
                 // 현재 시각에서 정확히 7일, 즉 168시간 전을 계산합니다.
                 Timestamp.from(now.minus(7, ChronoUnit.DAYS)), Timestamp.from(now));
-        return ResponseEntity.ok(menus);
     }
-
-    @Builder
-    public record PopularMenu(long menuId, String name, long price, long orderCount) {}
 }
 ```
 
-### 19. `src/main/java/com/example/coffee/PopularMenuZsetProjection.java`
+### 21. `src/main/java/com/example/coffee/menu/projection/PopularMenuZsetProjection.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 menu 기능의 projection 패키지에 속합니다.
+package com.example.coffee.menu.projection;
 
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -897,52 +830,331 @@ public class PopularMenuZsetProjection {
 }
 ```
 
-### 20. `src/main/java/com/example/coffee/OrderEventSender.java`
+### 22. `src/main/java/com/example/coffee/point/dto/ChargeRequest.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 point 기능의 dto 패키지에 속합니다.
+package com.example.coffee.point.dto;
+
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import lombok.Builder;
+
+@Builder
+// 사용자가 보낸 사용자 ID와 충전액을 담습니다. @Min/@Max는 허용 범위를 검사합니다.
+public record ChargeRequest(@Min(1) long userId, @Min(1) @Max(1000000000000L) long amount) {}
+```
+
+### 23. `src/main/java/com/example/coffee/point/dto/ChargeResponse.java`
+
+```java
+// 이 파일은 point 기능의 dto 패키지에 속합니다.
+package com.example.coffee.point.dto;
 
 import lombok.Builder;
 
-// 인터페이스는 '이 기능을 제공하라'는 약속입니다. 실제 Kafka 구현과 테스트용 가짜 구현을 바꿔 끼울 수 있습니다.
-public interface OrderEventSender {
-    // 주문 사건 하나를 보내는 함수의 모양만 선언합니다.
-    void send(OrderEvent event);
-
-    @Builder
-    // eventId는 메시지 고유 번호입니다. 주문 번호와 별도로 두어 재전송 중복을 확인합니다.
-    record OrderEvent(long eventId, long orderId, long userId, long menuId, long paidAmount) {}
-}
+@Builder
+// 충전 후 사용자에게 돌려줄 ID와 새 잔액입니다.
+// 응답에는 사용자 ID와 새 잔액만 담습니다. 충전 POST를 재시도하면 다시 충전될 수 있다는 점은 별도로 기억하세요.
+public record ChargeResponse(long userId, long balance) {}
 ```
 
-### 21. `src/main/java/com/example/coffee/OrderTopicConfig.java`
+### 24. `src/main/java/com/example/coffee/point/controller/PointController.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 point 기능의 controller 패키지에 속합니다.
+package com.example.coffee.point.controller;
 
-import org.apache.kafka.clients.admin.NewTopic;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.kafka.config.TopicBuilder;
+import com.example.coffee.point.dto.ChargeRequest;
+import com.example.coffee.point.dto.ChargeResponse;
+import com.example.coffee.point.service.PointService;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-// Spring 설정을 담은 클래스입니다.
-@Configuration
-public class OrderTopicConfig {
-    @Bean
-    NewTopic orderPaidTopic(@Value("${orders.topic}") String topic) {
-        // 하나의 Kafka 토픽을 세 갈래로 나눠 소비자 세 개가 동시에 처리할 수 있게 합니다.
-        // 브로커가 한 대인 연습 환경이라 복제본은 하나입니다. 장애에 안전한 운영 구성을 뜻하지는 않습니다.
-        return TopicBuilder.name(topic).partitions(3).replicas(1).build();
+@RestController
+// 이 클래스의 주소 앞부분은 /api/points입니다.
+@RequestMapping("/api/points")
+public class PointController {
+    // 실제 충전은 Service가 수행합니다. Controller는 HTTP 입구 역할만 합니다.
+    private final PointService points;
+
+    public PointController(PointService points) {
+        this.points = points;
+    }
+
+    // POST /api/points/charges 요청이 충전 함수를 실행합니다.
+    @PostMapping("/charges")
+    // JSON 본문을 ChargeRequest로 바꾸고 @Min, @Max 규칙을 검사합니다.
+    public ResponseEntity<ChargeResponse> charge(@Valid @RequestBody ChargeRequest request) {
+        // Service 결과를 HTTP 200 응답에 담습니다.
+        return ResponseEntity.ok(points.charge(request));
     }
 }
 ```
 
-### 22. `src/main/java/com/example/coffee/KafkaOrderEventSender.java`
+### 25. `src/main/java/com/example/coffee/point/service/PointService.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 point 기능의 service 패키지에 속합니다.
+package com.example.coffee.point.service;
 
+import com.example.coffee.common.error.ApiException;
+import com.example.coffee.point.dto.ChargeRequest;
+import com.example.coffee.point.dto.ChargeResponse;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class PointService {
+    private final JdbcTemplate jdbc;
+
+    public PointService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    // 계정 생성과 잔액 충전을 한 묶음으로 처리합니다. 실패하면 둘 다 취소됩니다.
+    @Transactional
+    public ChargeResponse charge(ChargeRequest request) {
+        // 처음 충전하는 사용자면 잔액 0인 계정을 먼저 만듭니다.
+        jdbc.update("INSERT INTO point_accounts(user_id, balance) VALUES (?, 0) " +
+                        // 이미 계정이 있으면 새 계정을 만들지 않고 그대로 둡니다. 동시에 첫 충전이 들어올 때도 도움이 됩니다.
+                        "ON DUPLICATE KEY UPDATE user_id = user_id",
+                request.userId());
+        // DB가 직접 잔액에 더합니다. 동시에 충전해도 한 요청의 값을 덮어쓰지 않게 합니다.
+        int updated = jdbc.update("UPDATE point_accounts SET balance = balance + ? " +
+                        // 더하기 전에 최대 잔액을 넘는지 검사합니다. ?에는 메서드의 금액 값이 안전하게 들어갑니다.
+                        "WHERE user_id = ? AND balance <= 1000000000000 - ?",
+                request.amount(), request.userId(), request.amount());
+        // 조건에 맞는 행을 바꾸지 못했다면 한도를 넘는 충전입니다. 409 오류를 보냅니다.
+        if (updated == 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "POINT_LIMIT_EXCEEDED", "Point balance limit exceeded");
+        }
+        // 충전 뒤 최종 잔액을 읽어 응답에 넣습니다.
+        Long balance = jdbc.queryForObject("SELECT balance FROM point_accounts WHERE user_id = ?",
+                Long.class, request.userId());
+        return ChargeResponse.builder().userId(request.userId()).balance(balance).build();
+    }
+}
+```
+
+### 26. `src/main/java/com/example/coffee/order/dto/OrderRequest.java`
+
+```java
+// 이 파일은 order 기능의 dto 패키지에 속합니다.
+package com.example.coffee.order.dto;
+
+import jakarta.validation.constraints.Min;
+import lombok.Builder;
+
+@Builder
+// 주문할 사람과 메뉴를 담습니다. 금액은 보내지 않고 서버가 메뉴 가격을 조회합니다.
+public record OrderRequest(@Min(1) long userId, @Min(1) long menuId) {}
+```
+
+### 27. `src/main/java/com/example/coffee/order/dto/OrderResponse.java`
+
+```java
+// 이 파일은 order 기능의 dto 패키지에 속합니다.
+package com.example.coffee.order.dto;
+
+import java.time.Instant;
+import lombok.Builder;
+
+@Builder
+// 주문 번호, 결제액, 주문 시각을 사용자에게 돌려줍니다.
+public record OrderResponse(long orderId, long userId, long menuId, long paidAmount, Instant orderedAt) {}
+```
+
+### 28. `src/main/java/com/example/coffee/order/dto/OrderEvent.java`
+
+```java
+// 이 파일은 order 기능의 dto 패키지에 속합니다.
+package com.example.coffee.order.dto;
+
+import lombok.Builder;
+
+@Builder
+// Kafka로 보낼 사건입니다. eventId는 같은 메시지가 다시 왔는지 확인하는 번호입니다.
+public record OrderEvent(long eventId, long orderId, long userId, long menuId, long paidAmount) {}
+```
+
+### 29. `src/main/java/com/example/coffee/order/controller/OrderController.java`
+
+```java
+// 이 파일은 order 기능의 controller 패키지에 속합니다.
+package com.example.coffee.order.controller;
+
+import com.example.coffee.order.dto.OrderRequest;
+import com.example.coffee.order.dto.OrderResponse;
+import com.example.coffee.order.service.OrderService;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+// 주문 API의 공통 주소는 /api/orders입니다.
+@RequestMapping("/api/orders")
+public class OrderController {
+    // 결제 SQL과 멱등성 규칙은 Service에 둡니다.
+    private final OrderService orders;
+
+    public OrderController(OrderService orders) {
+        this.orders = orders;
+    }
+
+    @PostMapping
+    public ResponseEntity<OrderResponse> place(@Valid @RequestBody OrderRequest request,
+                                               // 같은 결제를 다시 확인할 때 같은 요청 키를 보냅니다.
+                                               @RequestHeader("Idempotency-Key") String requestKey) {
+        // 서비스가 만든 주문 결과를 HTTP 201로 반환합니다.
+        return ResponseEntity.status(HttpStatus.CREATED).body(orders.place(request, requestKey));
+    }
+}
+```
+
+### 30. `src/main/java/com/example/coffee/order/service/OrderService.java`
+
+```java
+// 이 파일은 order 기능의 service 패키지에 속합니다.
+package com.example.coffee.order.service;
+
+import com.example.coffee.common.error.ApiException;
+import com.example.coffee.order.dto.OrderRequest;
+import com.example.coffee.order.dto.OrderResponse;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class OrderService {
+    // JdbcTemplate은 Java에서 SQL을 실행하게 해 주는 Spring 도구입니다.
+    private final JdbcTemplate jdbc;
+    private final Clock clock;
+
+    public OrderService(JdbcTemplate jdbc, Clock clock) {
+        this.jdbc = jdbc;
+        this.clock = clock;
+    }
+
+    // 잔액 차감·주문 저장·outbox 저장이 함께 커밋되거나 함께 취소됩니다.
+    @Transactional
+    public OrderResponse place(OrderRequest request, String requestKey) {
+        // 키가 공백뿐이거나 너무 길면 먼저 400 오류로 거절합니다.
+        if (requestKey.isBlank() || requestKey.length() > 128) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
+                    "Idempotency-Key must contain 1 to 128 characters");
+        }
+        // 가격은 사용자가 보내지 않고 서버가 DB에서 읽습니다. 사용자가 가격을 낮춰 보내는 일을 막습니다.
+        Long price = jdbc.query("SELECT price FROM menus WHERE id = ?",
+                rs -> rs.next() ? rs.getLong(1) : null, request.menuId());
+        // 없는 메뉴 ID라면 결제하지 않고 404 오류를 돌려줍니다.
+        if (price == null) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "MENU_NOT_FOUND", "Menu does not exist");
+        }
+        // 이 사용자의 잔액 행을 잠급니다. 다른 서버가 같은 사용자의 결제를 동시에 진행하면 여기서 기다립니다.
+        Long balance = jdbc.query("SELECT balance FROM point_accounts WHERE user_id = ? FOR UPDATE",
+                rs -> rs.next() ? rs.getLong(1) : null, request.userId());
+        // 충전한 계정이 아직 없다면 결제할 포인트가 없으므로 409 오류를 냅니다.
+        if (balance == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
+        }
+        OrderResponse previous = jdbc.query(
+                // 다른 서버가 같은 키의 주문을 방금 끝냈다면 그 최신 결과를 다시 읽습니다.
+                "SELECT id, menu_id, paid_amount, ordered_at FROM orders WHERE user_id = ? AND request_key = ? FOR UPDATE",
+                rs -> rs.next() ? OrderResponse.builder()
+                        .orderId(rs.getLong("id")).userId(request.userId())
+                        .menuId(rs.getLong("menu_id")).paidAmount(rs.getLong("paid_amount"))
+                        .orderedAt(rs.getTimestamp("ordered_at").toInstant()).build() : null,
+                request.userId(), requestKey);
+        // 예전 주문을 찾았다면 아래에서는 잔액을 다시 빼지 않습니다.
+        if (previous != null) {
+            // 같은 키로 다른 메뉴를 주문하는 것은 모순이므로 409 오류를 냅니다.
+            if (previous.menuId() != request.menuId()) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency-Key was already used for another menu");
+            }
+            // 같은 키로 재시도했다면 다시 결제하지 않고 원래 주문을 돌려줍니다.
+            return previous;
+        }
+        // 현재 잔액에서 메뉴 가격을 DB 안에서 뺍니다.
+        int debited = jdbc.update("UPDATE point_accounts SET balance = balance - ? " +
+                        // 돈이 충분할 때만 빼는 조건을 같은 UPDATE 문장에 둡니다. 동시 요청이 잔액보다 많이 쓰는 것을 막습니다.
+                        "WHERE user_id = ? AND balance >= ?", price, request.userId(), price);
+        // 차감한 행이 없다면 잔액 부족입니다. 예외가 발생하고 이 트랜잭션은 취소됩니다.
+        if (debited == 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
+        }
+
+        // 주문 시각을 한 번 정합니다. 주문 행과 outbox가 같은 기준 시각을 사용합니다.
+        Instant now = clock.instant();
+        // DB가 자동으로 만든 주문 번호를 받아올 빈 상자입니다.
+        KeyHolder key = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement statement = connection.prepareStatement(
+                    // 결제한 주문을 저장합니다. request_key도 함께 저장해야 다음 재시도를 알아볼 수 있습니다.
+                    "INSERT INTO orders(user_id, menu_id, paid_amount, ordered_at, request_key) VALUES (?, ?, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            statement.setLong(1, request.userId());
+            statement.setLong(2, request.menuId());
+            // ? 자리에 DB에서 읽은 실제 가격을 넣습니다. 문자열을 직접 이어 붙이지 않는 방식입니다.
+            statement.setLong(3, price);
+            statement.setTimestamp(4, Timestamp.from(now));
+            statement.setString(5, requestKey);
+            return statement;
+        }, key);
+        // 방금 DB가 만든 주문 ID를 꺼냅니다.
+        long orderId = key.getKey().longValue();
+        // Kafka에 보낼 기록도 같은 트랜잭션에 남깁니다.
+        jdbc.update("INSERT INTO order_outbox(order_id, user_id, menu_id, paid_amount, next_attempt_at) " +
+                "VALUES (?, ?, ?, ?, ?)", orderId, request.userId(), request.menuId(), price, Timestamp.from(now));
+        return OrderResponse.builder().orderId(orderId).userId(request.userId()).menuId(request.menuId())
+                .paidAmount(price).orderedAt(now).build();
+    }
+}
+```
+
+### 31. `src/main/java/com/example/coffee/order/service/OrderEventSender.java`
+
+```java
+// 이 파일은 order 기능의 service 패키지에 속합니다.
+package com.example.coffee.order.service;
+
+import com.example.coffee.order.dto.OrderEvent;
+
+// 인터페이스는 '이 기능을 제공하라'는 약속입니다. 실제 Kafka 구현과 테스트용 가짜 구현을 바꿔 끼울 수 있습니다.
+public interface OrderEventSender {
+    // 사건을 보내는 약속입니다. Kafka 구현과 테스트용 가짜 구현이 같은 모양을 따릅니다.
+    void send(OrderEvent event);
+}
+```
+
+### 32. `src/main/java/com/example/coffee/order/kafka/KafkaOrderEventSender.java`
+
+```java
+// 이 파일은 order 기능의 kafka 패키지에 속합니다.
+package com.example.coffee.order.kafka;
+
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -981,11 +1193,14 @@ public class KafkaOrderEventSender implements OrderEventSender {
 }
 ```
 
-### 23. `src/main/java/com/example/coffee/OutboxPublisher.java`
+### 33. `src/main/java/com/example/coffee/order/outbox/OutboxPublisher.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 order 기능의 outbox 패키지에 속합니다.
+package com.example.coffee.order.outbox;
 
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -1016,12 +1231,12 @@ public class OutboxPublisher {
     @Transactional
     public boolean publishOne() {
         Instant now = clock.instant();
-        List<OrderEventSender.OrderEvent> ready = jdbc.query(
+        List<OrderEvent> ready = jdbc.query(
                 "SELECT id, order_id, user_id, menu_id, paid_amount FROM order_outbox " +
                         // 지금 보내도 되는 사건 가운데 가장 오래된 한 건을 찾습니다.
                         // 다른 서버가 이미 잡은 행은 건너뜁니다. 같은 사건을 두 게시기가 동시에 집지 않게 합니다.
                         "WHERE next_attempt_at <= ? ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (rs, rowNum) -> OrderEventSender.OrderEvent.builder()
+                (rs, rowNum) -> OrderEvent.builder()
                         .eventId(rs.getLong("id")).orderId(rs.getLong("order_id"))
                         .userId(rs.getLong("user_id")).menuId(rs.getLong("menu_id"))
                         .paidAmount(rs.getLong("paid_amount")).build(),
@@ -1031,7 +1246,7 @@ public class OutboxPublisher {
             return false;
         }
 
-        OrderEventSender.OrderEvent event = ready.get(0);
+        OrderEvent event = ready.get(0);
         try {
             // Kafka에 보내고 확인을 기다립니다. 이 동안 DB 행 잠금을 쥐고 있어 오래 걸리면 성능 비용이 있습니다.
             sender.send(event);
@@ -1049,10 +1264,11 @@ public class OutboxPublisher {
 }
 ```
 
-### 24. `src/main/java/com/example/coffee/OutboxScheduler.java`
+### 34. `src/main/java/com/example/coffee/order/outbox/OutboxScheduler.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 order 기능의 outbox 패키지에 속합니다.
+package com.example.coffee.order.outbox;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -1079,11 +1295,13 @@ public class OutboxScheduler {
 }
 ```
 
-### 25. `src/main/java/com/example/coffee/AnalyticsConsumer.java`
+### 35. `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java`
 
 ```java
-package com.example.coffee;
+// 이 파일은 analytics 기능의 consumer 패키지에 속합니다.
+package com.example.coffee.analytics.consumer;
 
+import com.example.coffee.order.dto.OrderEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -1101,7 +1319,7 @@ public class AnalyticsConsumer {
     @KafkaListener(topics = "${orders.topic}", groupId = "coffee-analytics", concurrency = "3")
     // 수집 결과를 DB에 저장하는 작업을 한 묶음으로 처리합니다.
     @Transactional
-    public void collect(OrderEventSender.OrderEvent event) {
+    public void collect(OrderEvent event) {
         // 메시지 내용을 실습용 수집 표에 저장합니다.
         jdbc.update("INSERT INTO collected_order_events(event_id, order_id, user_id, menu_id, paid_amount) " +
                         // 같은 event_id가 다시 오면 의미 없는 갱신만 합니다. 수집 결과를 두 번 세지 않습니다.
@@ -1111,7 +1329,7 @@ public class AnalyticsConsumer {
 }
 ```
 
-### 26. `src/test/resources/application.yml`
+### 36. `src/test/resources/application.yml`
 
 ```yaml
 spring:
@@ -1147,11 +1365,24 @@ popularity:
     enabled: false
 ```
 
-### 27. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
+### 37. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
 
 ```java
 package com.example.coffee;
 
+import com.example.coffee.analytics.consumer.AnalyticsConsumer;
+import com.example.coffee.common.error.ApiException;
+import com.example.coffee.menu.controller.PopularMenuController;
+import com.example.coffee.menu.dto.PopularMenu;
+import com.example.coffee.menu.projection.PopularMenuZsetProjection;
+import com.example.coffee.order.controller.OrderController;
+import com.example.coffee.order.dto.OrderEvent;
+import com.example.coffee.order.dto.OrderRequest;
+import com.example.coffee.order.dto.OrderResponse;
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.outbox.OutboxPublisher;
+import com.example.coffee.point.controller.PointController;
+import com.example.coffee.point.dto.ChargeRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -1235,20 +1466,20 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 충전→주문→잔액→인기 메뉴→발행 대기 기록이 서로 맞는지 한 흐름으로 확인합니다.
     void chargeOrderAndPublishAreConsistent() {
-        assertThat(points.charge(PointController.ChargeRequest.builder()
+        assertThat(points.charge(ChargeRequest.builder()
                 .userId(1).amount(5000).build()).getBody().balance()).isEqualTo(5000);
 
-        OrderController.OrderResponse order = orders.place(OrderController.OrderRequest.builder()
+        OrderResponse order = orders.place(OrderRequest.builder()
                 .userId(1).menuId(1).build(), "charge-order-1").getBody();
         assertThat(order.paidAmount()).isEqualTo(4500);
         assertThat(balance(1)).isEqualTo(500);
-        assertThat(popular.list().getBody()).extracting(PopularMenuController.PopularMenu::orderCount)
+        assertThat(popular.list().getBody()).extracting(PopularMenu::orderCount)
                 .containsExactly(1L);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_outbox", Long.class)).isEqualTo(1);
 
         long eventId = jdbc.queryForObject("SELECT id FROM order_outbox", Long.class);
         assertThat(publisher.publishOne()).isTrue();
-        verify(sender).send(new OrderEventSender.OrderEvent(eventId, order.orderId(), 1, 1, 4500));
+        verify(sender).send(new OrderEvent(eventId, order.orderId(), 1, 1, 4500));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_outbox", Long.class)).isZero();
     }
 
@@ -1264,12 +1495,12 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 20개 주문을 동시에 보내도 45,000P로는 4,500P 메뉴를 정확히 10개만 살 수 있는지 확인합니다.
     void concurrentOrdersCannotOverspend() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(2).amount(45000).build());
+        points.charge(ChargeRequest.builder().userId(2).amount(45000).build());
         // 각 주문에 서로 다른 키를 만들기 위해 여러 스레드가 안전하게 증가시키는 숫자입니다.
         AtomicInteger requestNumber = new AtomicInteger();
         int succeeded = runConcurrently(20, () -> {
             try {
-                orders.place(OrderController.OrderRequest.builder().userId(2).menuId(1).build(),
+                orders.place(OrderRequest.builder().userId(2).menuId(1).build(),
                         "concurrent-order-" + requestNumber.incrementAndGet());
                 return true;
             } catch (ApiException exception) {
@@ -1289,7 +1520,7 @@ class CoffeeOrderIntegrationTest {
     // 20개 스레드가 100P씩 충전하면 2,000P가 되어야 합니다. 동시 충전 누락을 검사합니다.
     void concurrentChargesDoNotLoseUpdates() throws Exception {
         int succeeded = runConcurrently(20, () -> {
-            points.charge(PointController.ChargeRequest.builder().userId(3).amount(100).build());
+            points.charge(ChargeRequest.builder().userId(3).amount(100).build());
             return true;
         });
         assertThat(succeeded).isEqualTo(20);
@@ -1299,7 +1530,7 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 정확히 7일 전 주문은 포함하고 그보다 1초 오래된 주문은 빼는지 확인합니다.
     void popularMenusUseRollingSevenDaysAndDeterministicTies() {
-        points.charge(PointController.ChargeRequest.builder().userId(4).amount(100).build());
+        points.charge(ChargeRequest.builder().userId(4).amount(100).build());
         addOrder(4, 1, NOW.minus(Duration.ofDays(7)));
         addOrder(4, 1, NOW);
         addOrder(4, 2, NOW.minus(Duration.ofDays(1)));
@@ -1307,18 +1538,18 @@ class CoffeeOrderIntegrationTest {
         addOrder(4, 3, NOW.minus(Duration.ofDays(3)));
         addOrder(4, 4, NOW.minus(Duration.ofDays(7)).minusSeconds(1));
 
-        List<PopularMenuController.PopularMenu> result = popular.list().getBody();
-        assertThat(result).extracting(PopularMenuController.PopularMenu::menuId)
+        List<PopularMenu> result = popular.list().getBody();
+        assertThat(result).extracting(PopularMenu::menuId)
                 .containsExactly(1L, 2L, 3L);
-        assertThat(result).extracting(PopularMenuController.PopularMenu::orderCount)
+        assertThat(result).extracting(PopularMenu::orderCount)
                 .containsExactly(2L, 2L, 1L);
     }
 
     @Test
     // 첫 Kafka 전송을 실패시킨 뒤 outbox가 남고 다음 시도에서 없어지는지 확인합니다.
     void failedDeliveryStaysInOutboxForRetry() {
-        points.charge(PointController.ChargeRequest.builder().userId(5).amount(4500).build());
-        orders.place(OrderController.OrderRequest.builder().userId(5).menuId(1).build(), "delivery-retry");
+        points.charge(ChargeRequest.builder().userId(5).amount(4500).build());
+        orders.place(OrderRequest.builder().userId(5).menuId(1).build(), "delivery-retry");
         doThrow(new IllegalStateException("platform unavailable")).doNothing().when(sender).send(any());
 
         assertThat(publisher.publishOne()).isTrue();
@@ -1332,8 +1563,8 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 게시기 둘이 동시에 같은 메시지를 집지 못하는지 검사합니다.
     void concurrentPublishersDoNotClaimTheSameEvent() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(6).amount(4500).build());
-        orders.place(OrderController.OrderRequest.builder().userId(6).menuId(1).build(), "publish-concurrent");
+        points.charge(ChargeRequest.builder().userId(6).amount(4500).build());
+        orders.place(OrderRequest.builder().userId(6).menuId(1).build(), "publish-concurrent");
         // 첫 게시기를 잠시 멈춰 두어 두 번째 게시기와 정말 겹치게 만드는 테스트 도구입니다.
         CountDownLatch sending = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -1379,12 +1610,12 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 같은 키로 다시 주문해도 주문 ID가 같고 한 번만 차감되는지 확인합니다.
     void repeatedOrderRequestReturnsOriginalWithoutSecondDebitOrEvent() {
-        points.charge(PointController.ChargeRequest.builder().userId(8).amount(4500).build());
-        OrderController.OrderRequest request = OrderController.OrderRequest.builder()
+        points.charge(ChargeRequest.builder().userId(8).amount(4500).build());
+        OrderRequest request = OrderRequest.builder()
                 .userId(8).menuId(1).build();
 
-        OrderController.OrderResponse first = orders.place(request, "retry-8").getBody();
-        OrderController.OrderResponse replay = orders.place(request, "retry-8").getBody();
+        OrderResponse first = orders.place(request, "retry-8").getBody();
+        OrderResponse replay = orders.place(request, "retry-8").getBody();
 
         assertThat(replay).isEqualTo(first);
         assertThat(balance(8)).isZero();
@@ -1397,8 +1628,8 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 같은 키를 10개 스레드가 동시에 보내도 주문이 한 건인지 확인합니다.
     void concurrentRetriesCreateOnlyOneOrder() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(9).amount(4500).build());
-        OrderController.OrderRequest request = OrderController.OrderRequest.builder()
+        points.charge(ChargeRequest.builder().userId(9).amount(4500).build());
+        OrderRequest request = OrderRequest.builder()
                 .userId(9).menuId(1).build();
         ConcurrentLinkedQueue<Long> orderIds = new ConcurrentLinkedQueue<>();
 
@@ -1417,8 +1648,8 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 키를 다른 메뉴에 다시 쓰면 409를 내고 추가 차감을 하지 않는지 확인합니다.
     void reusedKeyForDifferentMenuConflicts() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(10).amount(10000).build());
-        orders.place(OrderController.OrderRequest.builder().userId(10).menuId(1).build(), "menu-choice");
+        points.charge(ChargeRequest.builder().userId(10).amount(10000).build());
+        orders.place(OrderRequest.builder().userId(10).menuId(1).build(), "menu-choice");
 
         mvc.perform(post("/api/orders").header("Idempotency-Key", "menu-choice")
                         .contentType("application/json")
@@ -1483,7 +1714,7 @@ class CoffeeOrderIntegrationTest {
     @Test
     // 같은 Kafka 사건을 두 번 넣어도 수집 표에는 한 행만 남는지 확인합니다.
     void analyticsConsumerDeduplicatesKafkaRedelivery() {
-        OrderEventSender.OrderEvent event = OrderEventSender.OrderEvent.builder()
+        OrderEvent event = OrderEvent.builder()
                 .eventId(77).orderId(88).userId(99).menuId(1).paidAmount(4500).build();
 
         analytics.collect(event);
@@ -1499,7 +1730,7 @@ class CoffeeOrderIntegrationTest {
     @SuppressWarnings("unchecked")
     // Redis를 가짜 객체로 바꿔 정확한 점수를 ZSET에 쓰는지 확인합니다.
     void zsetProjectionUsesRollingSevenDayCounts() {
-        points.charge(PointController.ChargeRequest.builder().userId(7).amount(100).build());
+        points.charge(ChargeRequest.builder().userId(7).amount(100).build());
         addOrder(7, 1, NOW);
         addOrder(7, 1, NOW.minus(Duration.ofDays(7)));
         addOrder(7, 2, NOW.minus(Duration.ofDays(7)).minusSeconds(1));
@@ -1510,16 +1741,18 @@ class CoffeeOrderIntegrationTest {
         new PopularMenuZsetProjection(jdbc, redis, Clock.fixed(NOW, ZoneOffset.UTC)).refresh();
 
         verify(zset).add(anyString(), eq("1"), eq(2.0));
-        verify(redis).rename(anyString(), eq(PopularMenuZsetProjection.KEY));
+        verify(redis).rename(anyString(), eq("popular:7d:counts"));
     }
 }
 ```
 
-### 28. `src/test/java/com/example/coffee/KafkaOrderEventSenderTest.java`
+### 38. `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java`
 
 ```java
-package com.example.coffee;
+package com.example.coffee.order.kafka;
 
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -1532,9 +1765,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 class KafkaOrderEventSenderTest {
     @SuppressWarnings("unchecked")
     // 진짜 Kafka 서버 대신 호출 내용을 검사할 가짜 전송 도구를 만듭니다.
-    private final KafkaTemplate<String, OrderEventSender.OrderEvent> kafka = mock(KafkaTemplate.class);
+    private final KafkaTemplate<String, OrderEvent> kafka = mock(KafkaTemplate.class);
     private final KafkaOrderEventSender sender = new KafkaOrderEventSender(kafka, "orders.paid");
-    private final OrderEventSender.OrderEvent event = OrderEventSender.OrderEvent.builder()
+    private final OrderEvent event = OrderEvent.builder()
             .eventId(7).orderId(8).userId(9).menuId(10).paidAmount(4500).build();
 
     @Test
@@ -1560,11 +1793,12 @@ class KafkaOrderEventSenderTest {
 }
 ```
 
-### 29. `src/test/java/com/example/coffee/MenuCacheFailureTest.java`
+### 39. `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java`
 
 ```java
-package com.example.coffee;
+package com.example.coffee.menu.service;
 
+import com.example.coffee.order.service.OrderEventSender;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
@@ -1592,7 +1826,7 @@ class MenuCacheFailureTest {
 }
 ```
 
-### 30. `.gitignore`
+### 40. `.gitignore`
 
 ```text
 # 빌드 도구가 만든 임시 파일은 Git에 올리지 않습니다.
@@ -1633,29 +1867,39 @@ out/
 | `build.gradle` | `298db43900a8781e3be7514f5a6723a5d77296f4d32ad361d11a6b701d2edb45` |
 | `gradle/wrapper/gradle-wrapper.properties` | `7e0821d895908883350587c74476b717016ab416320c44dc82a10def916c6fb5` |
 | `compose.yaml` | `7bf30651e83a5bd40ada052be40ad977ae02b1ba337522b12cb0833aa519c349` |
-| `src/main/resources/application.yml` | `d09904fd6b93b12bac25cd13624755e6827bc1dd12010ae23b3a4ea1060de6fc` |
+| `src/main/resources/application.yml` | `606a0a353cfe0d1d2352bbc6d4db5b0f8ef61a5c2047b65472b379adeb577c84` |
 | `src/main/resources/db/migration/V1__init.sql` | `8f3e9af804cecfa591aadba1defd8a99945d2043bb311ceb04be74b883521d3b` |
 | `src/main/resources/db/migration/V2__collected_order_events.sql` | `1c0bc2c5ce5d1316c9bc79805fa5ed479e29b65d009cd84d75acdd6d56f5ad07` |
 | `src/main/resources/db/migration/V3__order_idempotency.sql` | `1c7d5348ff90735fc91a6bb1b287fdc20bf43c1209205cb6fd63a4a3a5aad3a8` |
 | `src/main/java/com/example/coffee/CoffeeOrderApplication.java` | `5f19247eeec35f946c6107b1266ff2c08a93c5c0466ae9d51205d34af50088f3` |
-| `src/main/java/com/example/coffee/Menu.java` | `6a6b748fbb8e31170e9894edabe75f9587b0853cf4358bea8182885031268e29` |
-| `src/main/java/com/example/coffee/MenuController.java` | `aab85711d7da996bd9470990295072dfbdb7d42bc93be3f5333be6359367b793` |
-| `src/main/java/com/example/coffee/MenuService.java` | `0a695ad76b57cb7915c35459c6c1eb98f1b7551d4cbffd33c14b4f497c043ce2` |
-| `src/main/java/com/example/coffee/MenuCacheConfig.java` | `a49a53c97577cbc3681242b9b4b96f678a87c4394f26b2192090b4f4664c6c2a` |
-| `src/main/java/com/example/coffee/PointController.java` | `46f466fce28629f04c47f549f0fef1905d7a1e53175d3a3b7df08f210c26dbf9` |
-| `src/main/java/com/example/coffee/OrderController.java` | `8ceaf680ad18d28c48b5d6366a54a0d8dbb4866bc7e921b5a21a458a4e265498` |
-| `src/main/java/com/example/coffee/ApiException.java` | `09421c6083f89f50410756a27a24e5b9de9001f0e3a3b18412fc8bdc29f67fa6` |
-| `src/main/java/com/example/coffee/ApiErrorHandler.java` | `3dd0cec18e4739e4e3c28e5fa3a51ad7f63a11c35694357bc95d99dbeca78d7a` |
-| `src/main/java/com/example/coffee/PopularMenuController.java` | `ca8576ded4c9fc38f42efe1b66761f1a0dc69635add16a5bc0460e89fd13627b` |
-| `src/main/java/com/example/coffee/PopularMenuZsetProjection.java` | `d18713089c88059731b829b2fa0e7af983dc14ded5f55e8f01c2cdd171584840` |
-| `src/main/java/com/example/coffee/OrderEventSender.java` | `d5122861890c8c1748cdb16f0c46f721f501bda1c29b3a1b0fce3fe132c49d91` |
-| `src/main/java/com/example/coffee/OrderTopicConfig.java` | `deff478294f4cb7a0aee6905609161fca25edcfcff0a77f509ddf8d355739fdf` |
-| `src/main/java/com/example/coffee/KafkaOrderEventSender.java` | `dc84483c35ce78df0c85af4398b291b61a56f6aa59d822c8633123192f667c1d` |
-| `src/main/java/com/example/coffee/OutboxPublisher.java` | `b09dcf4a4f07346a8d751c2841413d66b6dc991c58efd4e1f13ac7d53abdefb1` |
-| `src/main/java/com/example/coffee/OutboxScheduler.java` | `b103ac129b432b45e013f593bce8a0f544b1eadeb1bbd10fdd483a2b58fb5df8` |
-| `src/main/java/com/example/coffee/AnalyticsConsumer.java` | `fe66b612d371ab608071e0453b1b12dbc90cc0ab9aa583c23bb889caf6838218` |
+| `src/main/java/com/example/coffee/config/kafka/OrderTopicConfig.java` | `6693d7bb3f8b6f2a5f28907fe9cab7fa48be665824aa8061760700d289dd1e47` |
+| `src/main/java/com/example/coffee/config/redis/MenuCacheConfig.java` | `e8f910cff75f2705396f8017e62ae6ec919613b349cf30695481459fc3b34cee` |
+| `src/main/java/com/example/coffee/common/dto/ErrorResponse.java` | `5181079aa18c1103ec43a34010f5e3f6a2775985cbeda13d9645fec87cd7cdbf` |
+| `src/main/java/com/example/coffee/common/error/ApiException.java` | `aa2014d956bfbb4b38c55ece23a18b82c6479e4b7483bc32b4c62f0c02131934` |
+| `src/main/java/com/example/coffee/common/error/ApiErrorHandler.java` | `4dc5f4df3cf8f8d266038628013849b8158878c5f2824739a7030bdab071343f` |
+| `src/main/java/com/example/coffee/menu/dto/Menu.java` | `5754ba59bad1d027748b92108965390fdddbdcad445a72af9393b1db688a05f2` |
+| `src/main/java/com/example/coffee/menu/dto/PopularMenu.java` | `a5c6a9709d0dff876de1241ea83ce3e61a0033fffcea6daeb936d01f029ac943` |
+| `src/main/java/com/example/coffee/menu/controller/MenuController.java` | `64dc2574cbe97202578ee118ee8f826e366962b538797c1ffaad0bdee3b8978a` |
+| `src/main/java/com/example/coffee/menu/controller/PopularMenuController.java` | `c46e5e578fa693f008134a5c54c5637a510d3cb32a0cc6d9763b3ea75f39820f` |
+| `src/main/java/com/example/coffee/menu/service/MenuService.java` | `6fa26a5d26ed1a01e2d8412061873823abbd6e3f708db2b7368727d6f58ba371` |
+| `src/main/java/com/example/coffee/menu/service/PopularMenuService.java` | `46f216726281afe5751e06c1ac0422897fdc6913c57391e92060f80984c8fadd` |
+| `src/main/java/com/example/coffee/menu/projection/PopularMenuZsetProjection.java` | `2f066406b41af110d1a0b6e03165543b98264695065ae7027c8dbe05bb05a829` |
+| `src/main/java/com/example/coffee/point/dto/ChargeRequest.java` | `2c3a6375b6a3d903373cebd202fa2b5cd58ca1adf42e5b3504082abd14251093` |
+| `src/main/java/com/example/coffee/point/dto/ChargeResponse.java` | `50097cc42a280f74f19e7d3a30ee7e120d9e8a4d059b508d49e81f39373b29a3` |
+| `src/main/java/com/example/coffee/point/controller/PointController.java` | `b16e451b3393f616a95783e8c850ef338658f6e15e1a130d7e171502c1614636` |
+| `src/main/java/com/example/coffee/point/service/PointService.java` | `aa0cd981785da43d0068cc0fdfe701f10686d814e3a6de3274d2cfb2a8812282` |
+| `src/main/java/com/example/coffee/order/dto/OrderRequest.java` | `d8c1e482e42094940eb73fc590eec0b6efd285bb39b12f3ebd33f84fb8df9ad5` |
+| `src/main/java/com/example/coffee/order/dto/OrderResponse.java` | `1d51d5cab0a86cb0075bef8543dbfb9f41b9e8239435e13a0ebd7d693fa03968` |
+| `src/main/java/com/example/coffee/order/dto/OrderEvent.java` | `be1c8a70b2d419399d475ea6b9b3db65a6a5826f4947888eec09c0e2ba1167f9` |
+| `src/main/java/com/example/coffee/order/controller/OrderController.java` | `3f0d855137413dd937114cd232c3111aac51566cd1459b568aeddfcda4c85567` |
+| `src/main/java/com/example/coffee/order/service/OrderService.java` | `b5831b8e343b40f152a63f6071ddeb751fa02c986f8267ace99b973cdd97054a` |
+| `src/main/java/com/example/coffee/order/service/OrderEventSender.java` | `c3c2ead9c05e914654138be856db18e4b2ab353bd5ab80981a29540927921de8` |
+| `src/main/java/com/example/coffee/order/kafka/KafkaOrderEventSender.java` | `4e565a15671992cce2f095447471aac2eb8a99f1c31cf0ff525e91b589443de4` |
+| `src/main/java/com/example/coffee/order/outbox/OutboxPublisher.java` | `780b4f3a36e34c29623dddc49bd89514eff4a0268f9fa64faa52156b42808d0d` |
+| `src/main/java/com/example/coffee/order/outbox/OutboxScheduler.java` | `12f087b0f2c41fc3eecffc4a42707f4b8183f28f01b6adc1c3f2bf4ed1526361` |
+| `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java` | `54a5b2dbe2969ff74b5f7e9eb15bb1facb386656a209edd357ad84394c0e03d8` |
 | `src/test/resources/application.yml` | `f9fdb52e73a6156063fb5fc61719bb11ec8d8983579e276421b06576e95404a9` |
-| `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java` | `72d9713131e7b9f5319ce0ce7be82e30fbdd3758dbd12fab5c99a53d307ccb2c` |
-| `src/test/java/com/example/coffee/KafkaOrderEventSenderTest.java` | `aa6820593754227b366e585232877c7259886f23cc4e4beea44bbd7dc17003bc` |
-| `src/test/java/com/example/coffee/MenuCacheFailureTest.java` | `61f95027ad2bba9f02cd1f4369184ce6a061de133d02ef3f59cb8e8f79b476fc` |
+| `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java` | `727235c6320f5b6508f06c22e5697345f0adb54d0bb4a7d5148b7a7228723a4e` |
+| `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java` | `cf392a5dd60225e9c1e50f9e9b3d83708a73837a3eb86d7d14669c8f1cfb2d42` |
+| `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java` | `9c8a52cd758c88a8c4d3e4a37ae6f087d739f96ccbf58a412b96b47cb09da1a6` |
 | `.gitignore` | `939062c2f4dfde8979aeb706a9599dfe6896a1a14272d7b0fe2723eb2f955b8f` |

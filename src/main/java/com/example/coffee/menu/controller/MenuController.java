@@ -1,5 +1,7 @@
-package com.example.coffee;
+package com.example.coffee.menu.controller;
 
+import com.example.coffee.menu.dto.Menu;
+import com.example.coffee.menu.service.MenuService;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;

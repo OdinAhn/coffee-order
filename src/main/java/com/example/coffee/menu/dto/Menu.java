@@ -1,4 +1,4 @@
-package com.example.coffee;
+package com.example.coffee.menu.dto;
 
 import java.io.Serializable;
 import lombok.Builder;

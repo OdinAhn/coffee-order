@@ -1,5 +1,7 @@
-package com.example.coffee;
+package com.example.coffee.order.kafka;
 
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;

@@ -1,4 +1,4 @@
-package com.example.coffee;
+package com.example.coffee.menu.projection;
 
 import java.sql.Timestamp;
 import java.time.Clock;

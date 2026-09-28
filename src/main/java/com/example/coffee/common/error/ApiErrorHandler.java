@@ -1,6 +1,6 @@
-package com.example.coffee;
+package com.example.coffee.common.error;
 
-import lombok.Builder;
+import com.example.coffee.common.dto.ErrorResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -37,6 +37,4 @@ public class ApiErrorHandler {
                         .message("Request body is invalid").build());
     }
 
-    @Builder
-    record ErrorResponse(String code, String message) {}
 }

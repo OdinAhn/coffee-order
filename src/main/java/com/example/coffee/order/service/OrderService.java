@@ -1,40 +1,32 @@
-package com.example.coffee;
+package com.example.coffee.order.service;
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
+import com.example.coffee.common.error.ApiException;
+import com.example.coffee.order.dto.OrderRequest;
+import com.example.coffee.order.dto.OrderResponse;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
-import lombok.Builder;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 
-@RestController
-@RequestMapping("/api/orders")
-public class OrderController {
+@Service
+public class OrderService {
     private final JdbcTemplate jdbc;
     private final Clock clock;
 
-    public OrderController(JdbcTemplate jdbc, Clock clock) {
+    public OrderService(JdbcTemplate jdbc, Clock clock) {
         this.jdbc = jdbc;
         this.clock = clock;
     }
 
-    @PostMapping
     @Transactional
-    public ResponseEntity<OrderResponse> place(@Valid @RequestBody OrderRequest request,
-                                               @RequestHeader("Idempotency-Key") String requestKey) {
+    public OrderResponse place(OrderRequest request, String requestKey) {
         if (requestKey.isBlank() || requestKey.length() > 128) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
                     "Idempotency-Key must contain 1 to 128 characters");
@@ -61,7 +53,7 @@ public class OrderController {
                 throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
                         "Idempotency-Key was already used for another menu");
             }
-            return ResponseEntity.status(HttpStatus.CREATED).body(previous);
+            return previous;
         }
         int debited = jdbc.update("UPDATE point_accounts SET balance = balance - ? " +
                         "WHERE user_id = ? AND balance >= ?", price, request.userId(), price);
@@ -85,13 +77,7 @@ public class OrderController {
         long orderId = key.getKey().longValue();
         jdbc.update("INSERT INTO order_outbox(order_id, user_id, menu_id, paid_amount, next_attempt_at) " +
                 "VALUES (?, ?, ?, ?, ?)", orderId, request.userId(), request.menuId(), price, Timestamp.from(now));
-        return ResponseEntity.status(HttpStatus.CREATED).body(OrderResponse.builder()
-                .orderId(orderId).userId(request.userId()).menuId(request.menuId())
-                .paidAmount(price).orderedAt(now).build());
+        return OrderResponse.builder().orderId(orderId).userId(request.userId()).menuId(request.menuId())
+                .paidAmount(price).orderedAt(now).build();
     }
-
-    @Builder
-    public record OrderRequest(@Min(1) long userId, @Min(1) long menuId) {}
-    @Builder
-    public record OrderResponse(long orderId, long userId, long menuId, long paidAmount, Instant orderedAt) {}
 }

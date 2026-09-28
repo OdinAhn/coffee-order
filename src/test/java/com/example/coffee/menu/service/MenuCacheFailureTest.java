@@ -1,5 +1,6 @@
-package com.example.coffee;
+package com.example.coffee.menu.service;
 
+import com.example.coffee.order.service.OrderEventSender;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;

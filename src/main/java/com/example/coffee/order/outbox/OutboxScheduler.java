@@ -1,4 +1,4 @@
-package com.example.coffee;
+package com.example.coffee.order.outbox;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;

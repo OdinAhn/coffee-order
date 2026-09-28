@@ -14,6 +14,42 @@ JDK 17과 Docker가 필요합니다. 위 `JAVA_HOME` 경로는 로컬 설치 위
 
 초기 메뉴는 Flyway 마이그레이션에서 4개를 등록합니다. 데모용 `compose.yaml`의 비밀번호는 운영 환경에서 교체해야 합니다.
 
+## 패키지 구조
+
+기능(`menu`, `point`, `order`, `analytics`)을 먼저 나누고, 각 기능 안에서 필요한 `controller`, `service`, `dto`를 구분합니다. HTTP 입력·출력은 컨트롤러가, 비즈니스 처리와 DB 트랜잭션은 서비스가 맡습니다. 요청·응답·이벤트 값은 별도 DTO로 둡니다. 사용하지 않는 계층 폴더는 만들지 않습니다.
+
+```text
+com.example.coffee
+├─ CoffeeOrderApplication.java
+├─ common/
+│  ├─ dto/           오류 응답
+│  └─ error/         공통 예외 처리
+├─ config/
+│  ├─ kafka/         주문 토픽 설정
+│  └─ redis/         메뉴 캐시 장애 처리
+├─ menu/
+│  ├─ controller/    메뉴·인기 메뉴 HTTP API
+│  ├─ service/       메뉴 조회·MySQL의 정확한 7일 인기 집계
+│  ├─ projection/    Redis ZSET 주문 횟수 기록
+│  └─ dto/           메뉴 응답 값
+├─ point/
+│  ├─ controller/    충전 HTTP API
+│  ├─ service/       원자적 잔액 충전
+│  └─ dto/           충전 요청·응답
+├─ order/
+│  ├─ controller/    주문 HTTP API
+│  ├─ service/       결제 트랜잭션·이벤트 발행 인터페이스
+│  ├─ outbox/        DB 기록을 Kafka로 발행하는 작업
+│  ├─ kafka/         Kafka 전송 구현
+│  └─ dto/           주문 요청·응답·이벤트
+└─ analytics/
+   └─ consumer/      Kafka 이벤트 수신
+```
+
+`PopularMenuService`는 MySQL 주문 내역에서 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둡니다. `PopularMenuZsetProjection`은 Redis ZSET에 주문 횟수를 기록하는 별도 역할이므로 `menu/projection`에 둡니다. Kafka 수신·전송과 outbox 작업도 각각 역할을 드러내는 패키지에 둡니다.
+
+Spring Boot 시작 클래스를 상위 패키지에 두어 하위 패키지가 컴포넌트 스캔 대상이 됩니다. 주문 이벤트 DTO가 `order.dto`로 이동해 Kafka JSON 역직렬화의 신뢰 패키지도 변경했습니다. Redis에 남은 이전 메뉴 객체와 충돌하지 않도록 메뉴 캐시 이름은 `menus-v2`를 사용합니다.
+
 ## API 명세
 
 금액은 모두 정수 원이며 `1원 = 1P`입니다. `userId`와 `menuId`는 양의 정수입니다. 모든 JSON 응답은 `ResponseEntity<T>`로 반환합니다.
@@ -130,5 +166,6 @@ MySQL의 `SKIP LOCKED` 동작은 [MySQL 8.4 SELECT 문서](https://dev.mysql.com
 - Redis 중단 중에도 두 앱 인스턴스의 메뉴 조회가 모두 200 응답과 메뉴 4개를 반환했습니다. 검증에 사용한 사용자 ID `900001`–`900003`의 기록은 개발용 MySQL 볼륨에 남아 있습니다.
 - Flyway V3 적용 후 실제 MySQL에서 동일 결제 키를 재시도해 주문 ID가 같고 차감·주문·Kafka 수집이 각각 한 번인 것을 확인했습니다. 다른 메뉴에 같은 키를 쓰면 409입니다.
 - 두 앱 인스턴스에 같은 키로 20건을 동시에 보내 모두 201과 같은 주문 ID를 받았고, MySQL 주문은 1건·최종 잔액은 0P였습니다. Redis ZSET은 새 주문을 반영해 메뉴 1의 점수가 13으로 갱신됐습니다. 검증 기록은 개발용 MySQL 볼륨에 남아 있습니다.
+- 기능별·계층별 패키지 이동 후에도 17개 테스트가 통과했습니다. 실제 Docker 환경에서 메뉴 조회, 충전, 주문 재시도, Kafka 수집 1건·outbox 대기 0건, 새 `menus-v2::all` Redis 캐시 키를 확인했습니다.
 
 Compose의 Kafka는 로컬 개발용 단일 브로커이며 복제 계수 1입니다. 운영 환경에서 브로커 장애까지 견디려면 다중 브로커와 복제 계수 3 이상으로 배포하고 토픽 설정을 조정해야 합니다. 사용한 Kafka 이미지 실행 방식은 [Apache Kafka Docker Quick Start](https://kafka.apache.org/41/getting-started/quickstart/), Redis 캐시 설정은 [Spring Boot Caching 문서](https://docs.spring.io/spring-boot/3.5/reference/io/caching.html)를 참고했습니다.

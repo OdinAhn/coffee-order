@@ -1,4 +1,4 @@
-package com.example.coffee;
+package com.example.coffee.common.error;
 
 import org.springframework.http.HttpStatus;
 

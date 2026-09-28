@@ -1,5 +1,7 @@
-package com.example.coffee;
+package com.example.coffee.order.outbox;
 
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.dto.OrderEvent;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -28,10 +30,10 @@ public class OutboxPublisher {
     @Transactional
     public boolean publishOne() {
         Instant now = clock.instant();
-        List<OrderEventSender.OrderEvent> ready = jdbc.query(
+        List<OrderEvent> ready = jdbc.query(
                 "SELECT id, order_id, user_id, menu_id, paid_amount FROM order_outbox " +
                         "WHERE next_attempt_at <= ? ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (rs, rowNum) -> OrderEventSender.OrderEvent.builder()
+                (rs, rowNum) -> OrderEvent.builder()
                         .eventId(rs.getLong("id")).orderId(rs.getLong("order_id"))
                         .userId(rs.getLong("user_id")).menuId(rs.getLong("menu_id"))
                         .paidAmount(rs.getLong("paid_amount")).build(),
@@ -40,7 +42,7 @@ public class OutboxPublisher {
             return false;
         }
 
-        OrderEventSender.OrderEvent event = ready.get(0);
+        OrderEvent event = ready.get(0);
         try {
             sender.send(event);
             jdbc.update("DELETE FROM order_outbox WHERE id = ?", event.eventId());

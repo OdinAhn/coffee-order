@@ -1,5 +1,18 @@
 package com.example.coffee;
 
+import com.example.coffee.analytics.consumer.AnalyticsConsumer;
+import com.example.coffee.common.error.ApiException;
+import com.example.coffee.menu.controller.PopularMenuController;
+import com.example.coffee.menu.dto.PopularMenu;
+import com.example.coffee.menu.projection.PopularMenuZsetProjection;
+import com.example.coffee.order.controller.OrderController;
+import com.example.coffee.order.dto.OrderEvent;
+import com.example.coffee.order.dto.OrderRequest;
+import com.example.coffee.order.dto.OrderResponse;
+import com.example.coffee.order.service.OrderEventSender;
+import com.example.coffee.order.outbox.OutboxPublisher;
+import com.example.coffee.point.controller.PointController;
+import com.example.coffee.point.dto.ChargeRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -78,20 +91,20 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void chargeOrderAndPublishAreConsistent() {
-        assertThat(points.charge(PointController.ChargeRequest.builder()
+        assertThat(points.charge(ChargeRequest.builder()
                 .userId(1).amount(5000).build()).getBody().balance()).isEqualTo(5000);
 
-        OrderController.OrderResponse order = orders.place(OrderController.OrderRequest.builder()
+        OrderResponse order = orders.place(OrderRequest.builder()
                 .userId(1).menuId(1).build(), "charge-order-1").getBody();
         assertThat(order.paidAmount()).isEqualTo(4500);
         assertThat(balance(1)).isEqualTo(500);
-        assertThat(popular.list().getBody()).extracting(PopularMenuController.PopularMenu::orderCount)
+        assertThat(popular.list().getBody()).extracting(PopularMenu::orderCount)
                 .containsExactly(1L);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_outbox", Long.class)).isEqualTo(1);
 
         long eventId = jdbc.queryForObject("SELECT id FROM order_outbox", Long.class);
         assertThat(publisher.publishOne()).isTrue();
-        verify(sender).send(new OrderEventSender.OrderEvent(eventId, order.orderId(), 1, 1, 4500));
+        verify(sender).send(new OrderEvent(eventId, order.orderId(), 1, 1, 4500));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_outbox", Long.class)).isZero();
     }
 
@@ -105,11 +118,11 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void concurrentOrdersCannotOverspend() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(2).amount(45000).build());
+        points.charge(ChargeRequest.builder().userId(2).amount(45000).build());
         AtomicInteger requestNumber = new AtomicInteger();
         int succeeded = runConcurrently(20, () -> {
             try {
-                orders.place(OrderController.OrderRequest.builder().userId(2).menuId(1).build(),
+                orders.place(OrderRequest.builder().userId(2).menuId(1).build(),
                         "concurrent-order-" + requestNumber.incrementAndGet());
                 return true;
             } catch (ApiException exception) {
@@ -128,7 +141,7 @@ class CoffeeOrderIntegrationTest {
     @Test
     void concurrentChargesDoNotLoseUpdates() throws Exception {
         int succeeded = runConcurrently(20, () -> {
-            points.charge(PointController.ChargeRequest.builder().userId(3).amount(100).build());
+            points.charge(ChargeRequest.builder().userId(3).amount(100).build());
             return true;
         });
         assertThat(succeeded).isEqualTo(20);
@@ -137,7 +150,7 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void popularMenusUseRollingSevenDaysAndDeterministicTies() {
-        points.charge(PointController.ChargeRequest.builder().userId(4).amount(100).build());
+        points.charge(ChargeRequest.builder().userId(4).amount(100).build());
         addOrder(4, 1, NOW.minus(Duration.ofDays(7)));
         addOrder(4, 1, NOW);
         addOrder(4, 2, NOW.minus(Duration.ofDays(1)));
@@ -145,17 +158,17 @@ class CoffeeOrderIntegrationTest {
         addOrder(4, 3, NOW.minus(Duration.ofDays(3)));
         addOrder(4, 4, NOW.minus(Duration.ofDays(7)).minusSeconds(1));
 
-        List<PopularMenuController.PopularMenu> result = popular.list().getBody();
-        assertThat(result).extracting(PopularMenuController.PopularMenu::menuId)
+        List<PopularMenu> result = popular.list().getBody();
+        assertThat(result).extracting(PopularMenu::menuId)
                 .containsExactly(1L, 2L, 3L);
-        assertThat(result).extracting(PopularMenuController.PopularMenu::orderCount)
+        assertThat(result).extracting(PopularMenu::orderCount)
                 .containsExactly(2L, 2L, 1L);
     }
 
     @Test
     void failedDeliveryStaysInOutboxForRetry() {
-        points.charge(PointController.ChargeRequest.builder().userId(5).amount(4500).build());
-        orders.place(OrderController.OrderRequest.builder().userId(5).menuId(1).build(), "delivery-retry");
+        points.charge(ChargeRequest.builder().userId(5).amount(4500).build());
+        orders.place(OrderRequest.builder().userId(5).menuId(1).build(), "delivery-retry");
         doThrow(new IllegalStateException("platform unavailable")).doNothing().when(sender).send(any());
 
         assertThat(publisher.publishOne()).isTrue();
@@ -168,8 +181,8 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void concurrentPublishersDoNotClaimTheSameEvent() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(6).amount(4500).build());
-        orders.place(OrderController.OrderRequest.builder().userId(6).menuId(1).build(), "publish-concurrent");
+        points.charge(ChargeRequest.builder().userId(6).amount(4500).build());
+        orders.place(OrderRequest.builder().userId(6).menuId(1).build(), "publish-concurrent");
         CountDownLatch sending = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -212,12 +225,12 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void repeatedOrderRequestReturnsOriginalWithoutSecondDebitOrEvent() {
-        points.charge(PointController.ChargeRequest.builder().userId(8).amount(4500).build());
-        OrderController.OrderRequest request = OrderController.OrderRequest.builder()
+        points.charge(ChargeRequest.builder().userId(8).amount(4500).build());
+        OrderRequest request = OrderRequest.builder()
                 .userId(8).menuId(1).build();
 
-        OrderController.OrderResponse first = orders.place(request, "retry-8").getBody();
-        OrderController.OrderResponse replay = orders.place(request, "retry-8").getBody();
+        OrderResponse first = orders.place(request, "retry-8").getBody();
+        OrderResponse replay = orders.place(request, "retry-8").getBody();
 
         assertThat(replay).isEqualTo(first);
         assertThat(balance(8)).isZero();
@@ -229,8 +242,8 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void concurrentRetriesCreateOnlyOneOrder() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(9).amount(4500).build());
-        OrderController.OrderRequest request = OrderController.OrderRequest.builder()
+        points.charge(ChargeRequest.builder().userId(9).amount(4500).build());
+        OrderRequest request = OrderRequest.builder()
                 .userId(9).menuId(1).build();
         ConcurrentLinkedQueue<Long> orderIds = new ConcurrentLinkedQueue<>();
 
@@ -248,8 +261,8 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void reusedKeyForDifferentMenuConflicts() throws Exception {
-        points.charge(PointController.ChargeRequest.builder().userId(10).amount(10000).build());
-        orders.place(OrderController.OrderRequest.builder().userId(10).menuId(1).build(), "menu-choice");
+        points.charge(ChargeRequest.builder().userId(10).amount(10000).build());
+        orders.place(OrderRequest.builder().userId(10).menuId(1).build(), "menu-choice");
 
         mvc.perform(post("/api/orders").header("Idempotency-Key", "menu-choice")
                         .contentType("application/json")
@@ -311,7 +324,7 @@ class CoffeeOrderIntegrationTest {
 
     @Test
     void analyticsConsumerDeduplicatesKafkaRedelivery() {
-        OrderEventSender.OrderEvent event = OrderEventSender.OrderEvent.builder()
+        OrderEvent event = OrderEvent.builder()
                 .eventId(77).orderId(88).userId(99).menuId(1).paidAmount(4500).build();
 
         analytics.collect(event);
@@ -326,7 +339,7 @@ class CoffeeOrderIntegrationTest {
     @Test
     @SuppressWarnings("unchecked")
     void zsetProjectionUsesRollingSevenDayCounts() {
-        points.charge(PointController.ChargeRequest.builder().userId(7).amount(100).build());
+        points.charge(ChargeRequest.builder().userId(7).amount(100).build());
         addOrder(7, 1, NOW);
         addOrder(7, 1, NOW.minus(Duration.ofDays(7)));
         addOrder(7, 2, NOW.minus(Duration.ofDays(7)).minusSeconds(1));
@@ -337,6 +350,6 @@ class CoffeeOrderIntegrationTest {
         new PopularMenuZsetProjection(jdbc, redis, Clock.fixed(NOW, ZoneOffset.UTC)).refresh();
 
         verify(zset).add(anyString(), eq("1"), eq(2.0));
-        verify(redis).rename(anyString(), eq(PopularMenuZsetProjection.KEY));
+        verify(redis).rename(anyString(), eq("popular:7d:counts"));
     }
 }
