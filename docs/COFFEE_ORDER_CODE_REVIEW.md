@@ -1,125 +1,78 @@
-# 커피 주문 시스템: 코드 바로 위에 주석을 단 입문 강의
+# 커피 주문 시스템 코드 리뷰: 코드 옆에서 이유까지 읽기
 
-**대상:** 프로그래밍을 막 배우기 시작한 학부 1~2학년. Java의 `class`, 함수, SQL의 `SELECT`를 처음 봐도 읽을 수 있게 작성했다.
+이 문서는 학부 1~2학년이 Java와 Spring Boot 코드를 **실행 순서대로** 공부하도록 썼다. 아래 코드 블록에는 현재 프로젝트의 소스 파일을 처음부터 끝까지 복사했다. 설명은 해당 코드 **바로 위**에 Java·Gradle은 `//`, SQL은 `--`, YAML·설정은 `#` 주석으로 적었다. 설명 주석은 이 문서에만 있으며 실제 소스는 바꾸지 않았다.
 
-**읽는 법:** 각 코드 블록에는 현재 프로젝트의 **전체 원본 코드 줄이 순서대로 들어 있다.** 설명이 필요한 코드 바로 위에 해당 언어의 주석을 덧붙였다. 따라서 코드와 설명을 한 화면에서 같이 읽을 수 있다. Java·Gradle은 `//`, SQL은 `--`, YAML·설정 파일은 `#`가 올바른 주석 문법이다. **실행 중인 원본 파일은 고치지 않았다.**
+## 1. 먼저 주문 한 건의 길을 따라가기
 
-Gradle이 자동 생성한 실행 스크립트 `gradlew`, `gradlew.bat`, 바이너리 JAR와 빌드 결과는 제외했다. 기존 `README.md`는 설계 설명이라 중복 복사하지 않았다. 아래에는 사람이 작성한 소스·설정·SQL·테스트 41개 파일을 모두 담았다.
-
-## 코드를 보기 전에: 프로그램이 하는 일
-
-1. 사용자는 `POST /api/points/charges`로 포인트를 충전한다. 1원은 1P다.
-2. 사용자는 커피 메뉴 ID와 `Idempotency-Key`를 보내 주문한다. 이 키는 “이번 결제 시도의 이름”이다.
-3. 서버는 **MySQL에 있는 가격**을 확인하고 잔액을 뺀 뒤, 주문과 Kafka 발행 대기 기록을 함께 저장한다.
-4. 별도 작업이 발행 대기 기록을 Kafka로 보낸다. 다른 작업은 그 메시지를 받아 수집 표에 저장한다.
-5. 인기 메뉴 API는 MySQL 주문을 세어 정확한 상위 세 메뉴를 돌려준다. Redis에는 조회를 돕는 메뉴 캐시와 참고용 순위 복사본을 둔다.
-
-### 처음 보는 말 풀이
-
-| 말 | 쉬운 뜻 | 코드에서 찾을 곳 |
-| --- | --- | --- |
-| API | 다른 프로그램이 정해진 주소로 요청할 수 있게 만든 입구 | `@GetMapping`, `@PostMapping` |
-| HTTP | 요청과 응답을 주고받는 규칙. GET은 주로 조회, POST는 주로 새 작업이다 | `MenuController`, `OrderController` |
-| JSON | `{"userId":1}`처럼 이름과 값을 적는 데이터 형식 | 요청·응답 DTO `record` |
-| class | 데이터와 함수를 묶은 Java 설계도 | `OrderController` 등 |
-| 메서드 | 클래스 안에 선언한 함수 | `place()`, `charge()` |
-| 어노테이션 | `@`로 시작하는 표시. Spring에 “이 함수를 API로 사용해” 같은 지시를 준다 | `@RestController`, `@Transactional` |
-| Bean | Spring이 생성하고 관리하는 Java 객체 | 생성자에 전달되는 `JdbcTemplate` 등 |
-| SQL | DB에 “읽어라/넣어라/바꿔라”라고 명령하는 언어 | `SELECT`, `INSERT`, `UPDATE` |
-| 트랜잭션 | 여러 DB 명령을 하나의 묶음으로 취급한다. 전부 성공하면 커밋, 실패하면 롤백한다 | `@Transactional` |
-| 동시성 | 여러 요청이 거의 동시에 실행되는 상황 | 계정 행 `FOR UPDATE` |
-| 메시지 | 다른 프로그램에 전달하는 사건 기록 | `OrderEvent` |
-| 캐시 | 다시 계산하거나 DB를 읽지 않으려고 잠시 보관한 복사본 | Redis 메뉴 캐시 |
-
-### 숫자로 이해하는 결제
-
-아메리카노 가격이 **4,500P**, 충전한 잔액이 **10,000P**라고 하자.
-
-```http
-POST /api/orders
-Content-Type: application/json
-Idempotency-Key: my-first-order
-
-{"userId":1,"menuId":1}
+```text
+포인트 충전 HTTP 요청 → PointController → PointService → MySQL 잔액
+주문 HTTP 요청      → OrderController → OrderService → MySQL 잔액·주문·outbox
+예약 발행 작업       → OutboxScheduler → OutboxPublisher → Kafka
+Kafka 수신          → AnalyticsConsumer → AnalyticsService → MySQL 수집 기록
+인기 메뉴 HTTP 요청 → PopularMenuController → PopularMenuService → MySQL 주문 집계
 ```
 
-| 시점 | 잔액 | 주문 수 | 아직 Kafka 확인을 기다리는 outbox 수 |
-| --- | ---: | ---: | ---: |
-| 주문 전 | 10,000P | 0 | 0 |
-| 첫 주문 직후, 발행 작업 전 | 5,500P | 1 | 1 |
-| **같은 키로 재시도** | 5,500P | 1 | 1 |
-| Kafka 확인 후 | 5,500P | 1 | 0 |
+1. 사용자가 메뉴 목록을 조회한다. 서버는 MySQL에서 목록을 읽고 Redis에 잠시 보관한다.
+2. 사용자가 포인트를 충전한다. `1원 = 1P`이고 DB가 잔액을 직접 더한다.
+3. 사용자가 `userId`, `menuId`, `Idempotency-Key`로 주문한다. 서버는 **DB에 저장된 메뉴 가격**으로 결제한다.
+4. 같은 DB 트랜잭션에서 잔액을 빼고, 주문과 Kafka 발행 대기 기록(outbox)을 저장한다.
+5. 예약 작업이 outbox를 Kafka로 보내고, 수신자는 `event_id`로 중복 저장을 막는다.
+6. 인기 메뉴 API는 **최근 7일의 주문을 MySQL에서 다시 세어** 상위 3개를 반환한다.
 
-같은 키로 다시 보낸 요청은 “새 커피 한 잔”이 아니라 “아까 결제가 되었는지 다시 알려 줘”라는 뜻으로 처리한다. 이것이 **멱등성**이다. 새 커피를 주문하려면 새 키를 만들어야 한다. 발행 작업이 빠르게 실행되면 첫 HTTP 응답 시점에 이미 outbox가 비어 있을 수도 있다.
+### 처음 나오는 단어
 
-### 왜 DB 트랜잭션과 행 잠금이 둘 다 필요한가?
+| 단어 | 여기서 뜻하는 것 |
+| --- | --- |
+| Controller | HTTP 주소에서 요청을 받고 응답을 만드는 클래스 |
+| Service | 충전·결제·집계처럼 실제 규칙을 실행하는 클래스 |
+| DTO / `record` | 요청·응답·이벤트의 값을 묶어 옮기는 자료형 |
+| Bean | Spring이 만들고 다른 객체의 생성자에 넣어 주는 객체 |
+| `@Transactional` | 메서드 안의 DB 작업을 하나의 성공 또는 실패로 묶는 표시 |
+| 멱등성 | 같은 결제 요청을 다시 보내도 잔액과 주문 수가 다시 바뀌지 않는 성질 |
+| outbox | Kafka에 보낼 사건을 주문과 함께 MySQL에 먼저 적어 두는 표 |
+| Kafka 파티션 | 한 토픽의 메시지를 나눠 보관하고 병렬로 읽는 단위 |
+| Redis ZSET | 값마다 점수를 붙여 순위를 저장하는 Redis 자료형 |
 
-트랜잭션은 **한 주문 안에서** 잔액 차감·주문 생성·발행 기록이 함께 성공하도록 한다. 행 잠금은 **서로 다른 두 주문 사이에서** 같은 사용자 잔액을 동시에 함부로 바꾸지 못하게 한다. 역할이 다르다.
+## 2. 왜 이런 순서로 DB와 Kafka를 쓰는가
 
-예를 들어 서버 A와 B가 같은 사용자의 주문을 동시에 받으면 A가 `point_accounts`의 사용자 행을 잠근다. B는 기다린다. A가 결제를 끝내고 잠금을 풀면 B는 바뀐 잔액과 이미 사용된 요청 키를 확인한다. Java의 `synchronized`는 서버 한 대의 메모리에서만 작동하지만 MySQL 행 잠금은 여러 서버가 공유한다.
+**동시 주문:** 두 서버가 같은 사용자 잔액을 읽고 각각 돈을 빼면 잔액이 틀어질 수 있다. `SELECT ... FOR UPDATE`로 같은 사용자 행을 한 번에 한 주문만 처리하게 하고, `UPDATE ... balance >= ?`로 잔액 부족을 DB에서 다시 검사한다. Java의 `synchronized`는 서버가 여러 대일 때 서로의 메모리를 잠그지 못한다.
 
-### 왜 Kafka에 곧바로 보내지 않고 outbox를 쓰나?
+**같은 요청 재시도:** 네트워크가 끊기면 사용자는 결제 성공 여부를 몰라 다시 보낼 수 있다. `Idempotency-Key`가 같으면 기존 주문을 찾아 반환한다. `(user_id, request_key)`의 MySQL 고유 인덱스가 여러 인스턴스에서도 중복 주문을 막는 마지막 장치다. 새 커피를 사려면 새 키가 필요하다.
 
-DB에는 주문이 저장됐는데 Kafka에 보내기 직전 서버가 꺼질 수 있다. 주문과 **“보내야 할 메시지”**를 같은 DB 트랜잭션에 저장하면 다시 켰을 때 outbox에서 메시지를 찾아 보낼 수 있다. 반대로 Kafka에는 보냈지만 outbox를 지우기 전에 꺼지면 같은 메시지를 다시 보낼 수 있다. 그래서 받는 쪽은 `event_id`로 중복을 걸러낸다. 이를 **최소 한 번 전달(at least once)**이라고 부른다.
+**DB 저장과 Kafka 전송:** 주문을 DB에 저장한 직후 서버가 꺼지면 Kafka 전송이 빠질 수 있다. 그래서 주문과 outbox를 같은 트랜잭션에 기록한다. 발행 작업은 Kafka 확인을 받은 뒤 outbox 행을 지운다. 확인 후 삭제 전에 서버가 꺼지면 같은 사건이 다시 갈 수 있으므로 수집 표의 `event_id` 기본 키로 중복 저장을 막는다. 이는 **최소 한 번 전달**이며 Kafka 메시지가 딱 한 번만 도착한다는 뜻은 아니다.
 
-### Redis ZSET은 왜 정확한 인기 메뉴 API가 아닌가?
+**정확한 인기 메뉴:** `PopularMenuService`는 MySQL 주문을 현재 시각 기준 7일 범위에서 직접 세므로 API의 정확한 값을 만든다. `PopularMenuZsetProjection`은 10초 간격으로 Redis ZSET에 복사한다. 복사본은 잠시 오래된 값일 수 있다. 새 주문마다 ZSET 점수만 1씩 올리면 7일이 지난 주문을 자동으로 빼지 못한다.
 
-ZSET은 각 메뉴에 주문 횟수 점수를 붙인 Redis 자료형이다. 10초마다 MySQL 주문을 다시 세어 복사하므로 그 사이에는 숫자가 이전 값일 수 있다. 따라서 `GET /api/menus/popular`은 MySQL을 직접 조회한다. 또한 “최근 7일”은 시간이 지나면서 오래된 주문이 빠져야 하므로 새 주문마다 점수를 1씩 올리는 방식만으로는 정확하지 않다.
-
-## 기능과 역할에 따라 패키지를 나눈 이유
-
-**패키지(package)**는 관련 Java 파일을 넣는 폴더이자 이름이다. 먼저 `menu`, `point`, `order`, `analytics`라는 **기능**으로 나누고, 각 기능 안에서 역할에 따라 `controller`, `service`, `dto` 등으로 한 번 더 나눴다.
+## 3. 패키지를 읽는 법
 
 ```text
 com.example.coffee
-├─ CoffeeOrderApplication.java        ← 프로그램 시작
-├─ common/
-│  ├─ dto/                           ← 공통 오류 응답 모양
-│  └─ error/                         ← 공통 오류 처리
-├─ config/
-│  ├─ kafka/                         ← Kafka 토픽 설정
-│  └─ redis/                         ← Redis 캐시 오류 처리
-├─ menu/
-│  ├─ controller/                    ← 메뉴 HTTP 주소
-│  ├─ service/                       ← 메뉴 조회·정확한 7일 인기 집계
-│  ├─ projection/                    ← Redis ZSET에 주문 횟수 기록
-│  └─ dto/                           ← 메뉴 데이터를 담는 객체
-├─ point/
-│  ├─ controller/                    ← 충전 HTTP 주소
-│  ├─ service/                       ← 잔액 충전 SQL과 트랜잭션
-│  └─ dto/                           ← 충전 요청·응답
-├─ order/
-│  ├─ controller/                    ← 주문 HTTP 주소
-│  ├─ service/                       ← 결제 규칙과 이벤트 발행 약속
-│  ├─ outbox/                        ← DB 기록을 Kafka로 옮기는 작업
-│  ├─ kafka/                         ← Kafka 전송 구현
-│  └─ dto/                           ← 주문 요청·응답·이벤트
-└─ analytics/
-   ├─ consumer/                      ← Kafka 메시지 수신
-   └─ service/                       ← DB 저장과 중복 처리
+├─ config/kafka, config/redis       프로그램 전체의 Kafka·Redis 설정
+├─ common/dto, common/error         공통 오류 응답과 예외
+├─ menu/controller, service, dto    메뉴 조회와 정확한 인기 메뉴 API
+├─ menu/projection                  Redis 순위 복사본 갱신
+├─ point/controller, service, dto   충전 HTTP 입구와 잔액 규칙
+├─ order/controller, service, dto   주문 HTTP 입구와 결제 규칙
+├─ order/outbox, kafka              발행 대기 작업과 Kafka 전송 구현
+└─ analytics/consumer, service      Kafka 수신과 수집 기록 저장
 ```
 
-**Controller**는 요청을 받아 입력을 검사하고 HTTP 응답을 돌려준다. **Service**는 실제 일을 한다. 예를 들어 `OrderService`가 잔액을 빼고 주문을 DB에 저장한다. **DTO**는 값을 담아 다른 곳으로 전달한다. 예를 들어 `OrderRequest`는 `userId`와 `menuId`를 담는다. `config`는 프로그램을 켤 때 필요한 Kafka·Redis 설정이다.
+`PopularMenuService`는 주문을 읽어 API 응답을 계산하므로 `menu/service`에 있다. `PopularMenuZsetProjection`은 Redis 복사본을 갱신하므로 `menu/projection`에 있다. `AnalyticsConsumer`는 메시지를 받고 `AnalyticsService`는 DB에 저장한다. 이 구분을 읽으며 **어느 클래스가 입력을 받고, 어느 클래스가 규칙을 실행하는지** 찾아보자.
 
-컨트롤러에서 SQL을 없앤 이유는 HTTP 처리와 결제 규칙을 분리하기 위해서다. 결제 트랜잭션을 `OrderService`에 두면 여러 입력 방식이 생기더라도 같은 결제 규칙을 사용할 수 있다. `@Transactional`은 Spring이 관리하는 서비스 메서드에 붙여야 DB 작업 전체를 묶는다. 다른 패키지의 클래스가 필요할 때는 파일 위쪽의 `import`가 위치를 알려 준다.
+## 4. 전체 소스와 줄 바로 위의 설명
 
-`PopularMenuService`는 MySQL 주문 내역을 읽고 최근 7일 상위 3개를 정확히 계산하므로 `menu/service`에 둔다. `PopularMenuZsetProjection`은 주문 수를 Redis ZSET에 미리 기록하는 별도 작업이므로 `menu/projection`에 둔다. `consumer`, `outbox`, `kafka`는 메시지를 받아들이거나 내보내는 역할을 이름으로 드러낸 패키지다. `AnalyticsConsumer`는 Kafka 메시지를 받고, `AnalyticsService`는 수집 내역을 MySQL에 저장한다. 같은 메시지가 다시 와도 `event_id`가 중복 저장되지 않도록 DB가 검사한다.
+아래 41개 코드 블록은 현재 파일의 원본 줄을 순서대로 모두 포함한다. 설명 주석을 걷어 내면 실제 파일과 일치한다.
 
-패키지를 옮긴 뒤 Kafka 주문 이벤트 DTO는 `order.dto`가 되었다. 그래서 JSON 역직렬화가 신뢰하는 패키지도 바꿨다. Redis의 옛 메뉴 캐시 객체와 섞이지 않도록 캐시 이름은 `menus-v2`를 사용한다.
+### 4-1. 빌드와 실행 환경
 
-## 전체 코드: 설명은 해당 줄 바로 위에 있다
-
-다음 코드 블록의 원본 줄은 파일과 같은 순서다. 설명 주석은 읽는 데 도움을 주려고 **복사본에만** 삽입했다. 각 파일의 역할을 이해하고 다음 파일로 넘어가자.
-
-
-### 1. `settings.gradle`
+#### 1. `settings.gradle`
 
 ```groovy
 // 이 프로그램의 이름을 Gradle에 알려 줍니다. Gradle은 코드를 빌드하고 테스트하는 도구입니다.
 rootProject.name = 'coffee-order'
 ```
 
-### 2. `build.gradle`
+#### 2. `build.gradle`
 
 ```groovy
 // 플러그인은 Gradle에 기능을 더합니다. Java 컴파일과 Spring Boot 실행 기능을 여기서 켭니다.
@@ -180,7 +133,7 @@ tasks.named('test') {
 }
 ```
 
-### 3. `gradle/wrapper/gradle-wrapper.properties`
+#### 3. `gradle/wrapper/gradle-wrapper.properties`
 
 ```properties
 distributionBase=GRADLE_USER_HOME
@@ -193,7 +146,7 @@ zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
 ```
 
-### 4. `compose.yaml`
+#### 4. `compose.yaml`
 
 ```yaml
 # Docker Compose가 함께 실행할 프로그램들을 나열합니다. 여기서는 MySQL, Kafka, Redis입니다.
@@ -241,7 +194,7 @@ volumes:
   mysql_data:
 ```
 
-### 5. `src/main/resources/application.yml`
+#### 5. `src/main/resources/application.yml`
 
 ```yaml
 # Spring Boot의 실행 설정입니다. 들여쓰기로 어떤 설정이 어느 기능에 속하는지 구분합니다.
@@ -298,7 +251,9 @@ orders:
 spring.task.scheduling.pool.size: 2
 ```
 
-### 6. `src/main/resources/db/migration/V1__init.sql`
+### 4-2. MySQL 표와 프로그램 시작
+
+#### 6. `src/main/resources/db/migration/V1__init.sql`
 
 ```sql
 -- 메뉴 표를 만듭니다. 한 행이 커피 메뉴 하나입니다.
@@ -352,7 +307,7 @@ INSERT INTO menus(name, price) VALUES
     ('Cold Brew', 6000);
 ```
 
-### 7. `src/main/resources/db/migration/V2__collected_order_events.sql`
+#### 7. `src/main/resources/db/migration/V2__collected_order_events.sql`
 
 ```sql
 -- Kafka 메시지를 받은 쪽을 흉내 낸 표입니다. 실제 분석 플랫폼의 역할을 실습용 DB로 표현했습니다.
@@ -368,7 +323,7 @@ CREATE TABLE collected_order_events (
 );
 ```
 
-### 8. `src/main/resources/db/migration/V3__order_idempotency.sql`
+#### 8. `src/main/resources/db/migration/V3__order_idempotency.sql`
 
 ```sql
 -- 클라이언트가 붙인 결제 시도 이름을 저장합니다. 이미 있던 주문은 이 값이 없어서 NULL을 허용합니다.
@@ -377,7 +332,7 @@ ALTER TABLE orders ADD COLUMN request_key VARCHAR(128);
 CREATE UNIQUE INDEX uq_orders_user_request_key ON orders(user_id, request_key);
 ```
 
-### 9. `src/main/java/com/example/coffee/CoffeeOrderApplication.java`
+#### 9. `src/main/java/com/example/coffee/CoffeeOrderApplication.java`
 
 ```java
 package com.example.coffee;
@@ -406,7 +361,7 @@ public class CoffeeOrderApplication {
 }
 ```
 
-### 10. `src/main/java/com/example/coffee/config/kafka/OrderTopicConfig.java`
+#### 10. `src/main/java/com/example/coffee/config/kafka/OrderTopicConfig.java`
 
 ```java
 // 이 파일은 config 기능의 kafka 패키지에 속합니다.
@@ -430,7 +385,7 @@ public class OrderTopicConfig {
 }
 ```
 
-### 11. `src/main/java/com/example/coffee/config/redis/MenuCacheConfig.java`
+#### 11. `src/main/java/com/example/coffee/config/redis/MenuCacheConfig.java`
 
 ```java
 // 이 파일은 config 기능의 redis 패키지에 속합니다.
@@ -480,7 +435,7 @@ public class MenuCacheConfig implements CachingConfigurer {
 }
 ```
 
-### 12. `src/main/java/com/example/coffee/common/dto/ErrorResponse.java`
+#### 12. `src/main/java/com/example/coffee/common/dto/ErrorResponse.java`
 
 ```java
 // 이 파일은 common 기능의 dto 패키지에 속합니다.
@@ -493,7 +448,7 @@ import lombok.Builder;
 public record ErrorResponse(String code, String message) {}
 ```
 
-### 13. `src/main/java/com/example/coffee/common/error/ApiException.java`
+#### 13. `src/main/java/com/example/coffee/common/error/ApiException.java`
 
 ```java
 // 이 파일은 common 기능의 error 패키지에 속합니다.
@@ -525,7 +480,7 @@ public class ApiException extends RuntimeException {
 }
 ```
 
-### 14. `src/main/java/com/example/coffee/common/error/ApiErrorHandler.java`
+#### 14. `src/main/java/com/example/coffee/common/error/ApiErrorHandler.java`
 
 ```java
 // 이 파일은 common 기능의 error 패키지에 속합니다.
@@ -576,7 +531,9 @@ public class ApiErrorHandler {
 }
 ```
 
-### 15. `src/main/java/com/example/coffee/menu/dto/Menu.java`
+### 4-3. 메뉴 조회와 인기 메뉴
+
+#### 15. `src/main/java/com/example/coffee/menu/dto/Menu.java`
 
 ```java
 // 이 파일은 menu 기능의 dto 패키지에 속합니다.
@@ -592,7 +549,7 @@ import lombok.Builder;
 public record Menu(long id, String name, long price) implements Serializable {}
 ```
 
-### 16. `src/main/java/com/example/coffee/menu/dto/PopularMenu.java`
+#### 16. `src/main/java/com/example/coffee/menu/dto/PopularMenu.java`
 
 ```java
 // 이 파일은 menu 기능의 dto 패키지에 속합니다.
@@ -605,7 +562,7 @@ import lombok.Builder;
 public record PopularMenu(long menuId, String name, long price, long orderCount) {}
 ```
 
-### 17. `src/main/java/com/example/coffee/menu/controller/MenuController.java`
+#### 17. `src/main/java/com/example/coffee/menu/controller/MenuController.java`
 
 ```java
 // 이 파일은 menu 기능의 controller 패키지에 속합니다.
@@ -641,7 +598,7 @@ public class MenuController {
 }
 ```
 
-### 18. `src/main/java/com/example/coffee/menu/controller/PopularMenuController.java`
+#### 18. `src/main/java/com/example/coffee/menu/controller/PopularMenuController.java`
 
 ```java
 // 이 파일은 menu 기능의 controller 패키지에 속합니다.
@@ -674,10 +631,10 @@ public class PopularMenuController {
 }
 ```
 
-### 19. `src/main/java/com/example/coffee/menu/service/MenuService.java`
+#### 19. `src/main/java/com/example/coffee/menu/service/MenuService.java`
 
 ```java
-// 이 파일은 menu 기능의 service 패키지에 속합니다.
+// 이 파일은 메뉴를 읽는 기능입니다. HTTP 주소를 다루는 Controller와 분리했습니다.
 package com.example.coffee.menu.service;
 
 import com.example.coffee.menu.dto.Menu;
@@ -686,31 +643,32 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-// Controller가 사용할 실제 메뉴 조회 기능을 가진 Spring 객체라는 표시입니다.
+// Spring이 이 객체를 만들어 Controller에 넣어 줍니다.
 @Service
 public class MenuService {
+    // JdbcTemplate은 SQL을 DB에 보내고 결과를 받는 도구입니다.
     private final JdbcTemplate jdbc;
 
     public MenuService(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
-    // 같은 메뉴 목록을 이미 Redis에서 찾으면 아래 SQL을 다시 실행하지 않고 그 값을 돌려줍니다.
+    // 같은 목록을 다시 요청하면 먼저 Redis 캐시를 찾아봅니다. 처음에는 아래 메서드가 실행됩니다.
     @Cacheable(cacheNames = "menus-v2", key = "'all'")
     public List<Menu> list() {
-        // SQL로 DB 행을 읽습니다. ?가 없는 고정 메뉴 조회이고, 각 행을 아래의 Menu 객체로 바꿉니다.
+        // 캐시에 값이 없으면 MySQL의 menus 표에서 목록을 읽습니다.
         return jdbc.query("SELECT id, name, price FROM menus ORDER BY id",
-                // rs는 지금 읽은 DB 한 행입니다. 그 행의 id, name, price를 꺼내 Menu를 만듭니다.
+                // DB의 한 행을 Menu 객체 하나로 바꿉니다. 행이 여러 개면 목록이 됩니다.
                 (rs, rowNum) -> Menu.builder().id(rs.getLong("id"))
                         .name(rs.getString("name")).price(rs.getLong("price")).build());
     }
 }
 ```
 
-### 20. `src/main/java/com/example/coffee/menu/service/PopularMenuService.java`
+#### 20. `src/main/java/com/example/coffee/menu/service/PopularMenuService.java`
 
 ```java
-// 이 파일은 menu 기능의 service 패키지에 속합니다.
+// 이 파일은 인기 메뉴 API에 줄 정확한 결과를 계산합니다.
 package com.example.coffee.menu.service;
 
 import com.example.coffee.menu.dto.PopularMenu;
@@ -725,6 +683,7 @@ import org.springframework.stereotype.Service;
 @Service
 public class PopularMenuService {
     private final JdbcTemplate jdbc;
+    // 시간을 외부에서 받으면 테스트에서는 날짜를 고정해 7일 경계를 검사할 수 있습니다.
     private final Clock clock;
 
     public PopularMenuService(JdbcTemplate jdbc, Clock clock) {
@@ -732,33 +691,33 @@ public class PopularMenuService {
         this.clock = clock;
     }
 
-    // DB의 결제 완료 주문을 최근 7일 범위로 묶어 정확한 인기 메뉴를 계산합니다.
+    // 호출할 때마다 MySQL 주문을 다시 세어 현재 시점의 결과를 만듭니다.
     public List<PopularMenu> list() {
-        // 지금 시각을 한 번만 읽어 7일의 시작과 끝을 같은 기준으로 계산합니다.
+        // 이번 조회의 기준 시각을 한 번만 정합니다. 시작·끝에 같은 기준을 씁니다.
         Instant now = clock.instant();
-        // COUNT는 DB 행의 개수를 셉니다. 주문 한 행이 메뉴 주문 한 번입니다.
+        // 주문 한 행을 주문 한 번으로 세고 메뉴별 횟수를 만듭니다.
         return jdbc.query("SELECT m.id, m.name, m.price, COUNT(o.id) AS order_count " +
-                        // 주문 표와 메뉴 표를 연결해 메뉴 이름과 가격도 함께 가져옵니다.
+                        // 주문 표의 menu_id로 메뉴 이름과 현재 가격을 함께 읽습니다.
                         "FROM orders o JOIN menus m ON m.id = o.menu_id " +
+                        // 기준 시각에서 7일 전부터 지금까지의 주문만 포함합니다. ?는 아래 Timestamp 값입니다.
                         "WHERE o.ordered_at >= ? AND o.ordered_at <= ? " +
-                        // 같은 메뉴의 주문을 한 그룹으로 묶어 COUNT가 메뉴별 숫자가 되게 합니다.
+                        // 같은 메뉴의 주문을 한 묶음으로 만들어 COUNT를 계산합니다.
                         "GROUP BY m.id, m.name, m.price " +
-                        // 많이 주문된 순서로 정렬하고, 수가 같으면 메뉴 ID가 작은 것이 먼저 오게 합니다.
-                        // 상위 세 메뉴만 반환합니다.
+                        // 주문 수가 같으면 메뉴 ID가 작은 순서로 정합니다. LIMIT 3은 세 개만 남깁니다.
                         "ORDER BY order_count DESC, m.id ASC LIMIT 3",
+                // SQL 결과 한 행을 API 응답 값으로 옮깁니다.
                 (rs, rowNum) -> PopularMenu.builder().menuId(rs.getLong("id"))
                         .name(rs.getString("name")).price(rs.getLong("price"))
                         .orderCount(rs.getLong("order_count")).build(),
-                // 현재 시각에서 정확히 7일, 즉 168시간 전을 계산합니다.
                 Timestamp.from(now.minus(7, ChronoUnit.DAYS)), Timestamp.from(now));
     }
 }
 ```
 
-### 21. `src/main/java/com/example/coffee/menu/projection/PopularMenuZsetProjection.java`
+#### 21. `src/main/java/com/example/coffee/menu/projection/PopularMenuZsetProjection.java`
 
 ```java
-// 이 파일은 menu 기능의 projection 패키지에 속합니다.
+// projection은 원본 주문 데이터를 Redis의 읽기용 복사본으로 옮기는 작업입니다.
 package com.example.coffee.menu.projection;
 
 import java.sql.Timestamp;
@@ -776,13 +735,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-// Spring이 이 객체를 만들어 예약 작업으로 실행할 수 있게 합니다.
 @Component
-// 테스트에서는 이 작업을 끌 수 있고, 실제 실행에서는 기본으로 켭니다.
+// 테스트에서는 이 예약 작업을 설정으로 끌 수 있습니다.
 @ConditionalOnProperty(name = "popularity.zset.enabled", havingValue = "true", matchIfMissing = true)
 public class PopularMenuZsetProjection {
     private static final Logger log = LoggerFactory.getLogger(PopularMenuZsetProjection.class);
-    // Redis에서 인기 메뉴 순위를 저장할 이름입니다.
+    // Redis ZSET을 저장할 이름입니다. 멤버는 메뉴 ID, 점수는 주문 횟수입니다.
     static final String KEY = "popular:7d:counts";
 
     private final JdbcTemplate jdbc;
@@ -795,33 +753,34 @@ public class PopularMenuZsetProjection {
         this.clock = clock;
     }
 
-    // 앞선 실행이 끝난 뒤 기본 10초를 기다리고 다시 집계합니다.
+    // 기본적으로 이전 실행이 끝난 뒤 10초가 지나면 다시 계산합니다.
     @Scheduled(fixedDelayString = "${popularity.zset.refresh-ms:10000}")
     public void refresh() {
+        // 정확히 어떤 7일 구간을 복사할지 기준 시각을 정합니다.
         Instant now = clock.instant();
+        // Redis 점수를 하나씩 더하지 않고 MySQL 주문을 다시 세어 만료된 주문도 제외합니다.
         List<MenuCount> counts = jdbc.query(
                 "SELECT menu_id, COUNT(*) AS order_count FROM orders " +
-                        // MySQL에서 최근 7일 주문을 메뉴별로 다시 셉니다. 7일 지난 주문을 자동으로 빼기 위해 전체를 다시 계산합니다.
                         "WHERE ordered_at >= ? AND ordered_at <= ? GROUP BY menu_id",
                 (rs, rowNum) -> new MenuCount(rs.getLong("menu_id"), rs.getLong("order_count")),
                 Timestamp.from(now.minus(7, ChronoUnit.DAYS)), Timestamp.from(now));
         try {
-            // 최근 주문이 없다면 Redis에 남은 오래된 순위를 삭제합니다.
+            // 최근 7일 주문이 없으면 이전 순위가 남지 않도록 키를 지웁니다.
             if (counts.isEmpty()) {
                 redis.delete(KEY);
                 return;
             }
-            // 새 순위를 만드는 동안 쓸 임시 이름입니다. 여러 서버가 동시에 만들어도 이름이 겹치지 않게 합니다.
+            // 새 순위를 임시 키에 만듭니다. 만드는 도중 독자가 반쪽 결과를 보지 않게 합니다.
             String temporaryKey = KEY + ":building:" + UUID.randomUUID();
             for (MenuCount count : counts) {
-                // ZSET은 점수를 가진 집합입니다. 메뉴 ID를 항목으로, 주문 횟수를 점수로 넣습니다.
+                // ZSET에 메뉴 ID와 주문 횟수 점수를 넣습니다.
                 redis.opsForZSet().add(temporaryKey, Long.toString(count.menuId()), count.orderCount());
             }
-            // 임시 키가 오래 남지 않도록 2분 뒤 만료되게 합니다.
+            // 중간에 작업이 끊기면 임시 키가 오래 남지 않도록 만료 시간을 둡니다.
             redis.expire(temporaryKey, Duration.ofMinutes(2));
-            // 완성된 임시 순위를 공개 이름으로 한 번에 바꿉니다. 만드는 중인 순위가 보이지 않게 합니다.
+            // 완성한 임시 키를 최종 키로 교체합니다.
             redis.rename(temporaryKey, KEY);
-        // Redis가 고장 나면 경고만 남깁니다. 정확한 인기 메뉴 API는 MySQL을 읽으므로 이 실패에 영향을 받지 않습니다.
+        // Redis가 잠시 실패해도 주문·결제와 정확한 MySQL 인기 API는 계속 동작합니다.
         } catch (RuntimeException exception) {
             log.warn("Popularity ZSET refresh failed: {}", exception.toString());
         }
@@ -831,7 +790,9 @@ public class PopularMenuZsetProjection {
 }
 ```
 
-### 22. `src/main/java/com/example/coffee/point/dto/ChargeRequest.java`
+### 4-4. 포인트 충전
+
+#### 22. `src/main/java/com/example/coffee/point/dto/ChargeRequest.java`
 
 ```java
 // 이 파일은 point 기능의 dto 패키지에 속합니다.
@@ -846,7 +807,7 @@ import lombok.Builder;
 public record ChargeRequest(@Min(1) long userId, @Min(1) @Max(1000000000000L) long amount) {}
 ```
 
-### 23. `src/main/java/com/example/coffee/point/dto/ChargeResponse.java`
+#### 23. `src/main/java/com/example/coffee/point/dto/ChargeResponse.java`
 
 ```java
 // 이 파일은 point 기능의 dto 패키지에 속합니다.
@@ -860,10 +821,10 @@ import lombok.Builder;
 public record ChargeResponse(long userId, long balance) {}
 ```
 
-### 24. `src/main/java/com/example/coffee/point/controller/PointController.java`
+#### 24. `src/main/java/com/example/coffee/point/controller/PointController.java`
 
 ```java
-// 이 파일은 point 기능의 controller 패키지에 속합니다.
+// Controller는 외부 HTTP 요청을 받는 입구입니다.
 package com.example.coffee.point.controller;
 
 import com.example.coffee.point.dto.ChargeRequest;
@@ -877,30 +838,28 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-// 이 클래스의 주소 앞부분은 /api/points입니다.
+// 이 클래스의 주소는 /api/points/charges로 시작합니다.
 @RequestMapping("/api/points")
 public class PointController {
-    // 실제 충전은 Service가 수행합니다. Controller는 HTTP 입구 역할만 합니다.
     private final PointService points;
 
     public PointController(PointService points) {
         this.points = points;
     }
 
-    // POST /api/points/charges 요청이 충전 함수를 실행합니다.
     @PostMapping("/charges")
-    // JSON 본문을 ChargeRequest로 바꾸고 @Min, @Max 규칙을 검사합니다.
+    // JSON 본문을 ChargeRequest로 바꾸고 숫자 범위를 검사합니다.
     public ResponseEntity<ChargeResponse> charge(@Valid @RequestBody ChargeRequest request) {
-        // Service 결과를 HTTP 200 응답에 담습니다.
+        // 실제 충전은 Service에 맡기고 결과를 HTTP 200 응답에 담습니다.
         return ResponseEntity.ok(points.charge(request));
     }
 }
 ```
 
-### 25. `src/main/java/com/example/coffee/point/service/PointService.java`
+#### 25. `src/main/java/com/example/coffee/point/service/PointService.java`
 
 ```java
-// 이 파일은 point 기능의 service 패키지에 속합니다.
+// 이 파일에 포인트 충전 규칙과 DB 작업을 둡니다.
 package com.example.coffee.point.service;
 
 import com.example.coffee.common.error.ApiException;
@@ -919,24 +878,24 @@ public class PointService {
         this.jdbc = jdbc;
     }
 
-    // 계정 생성과 잔액 충전을 한 묶음으로 처리합니다. 실패하면 둘 다 취소됩니다.
+    // 계정 생성과 잔액 증가를 한 묶음으로 처리합니다. 실패하면 둘 다 취소됩니다.
     @Transactional
     public ChargeResponse charge(ChargeRequest request) {
-        // 처음 충전하는 사용자면 잔액 0인 계정을 먼저 만듭니다.
+        // 처음 충전하는 사용자라면 잔액 0인 계정을 먼저 만듭니다.
         jdbc.update("INSERT INTO point_accounts(user_id, balance) VALUES (?, 0) " +
-                        // 이미 계정이 있으면 새 계정을 만들지 않고 그대로 둡니다. 동시에 첫 충전이 들어올 때도 도움이 됩니다.
+                        // 이미 계정이 있으면 기존 잔액은 그대로 두고 다음 줄로 넘어갑니다.
                         "ON DUPLICATE KEY UPDATE user_id = user_id",
                 request.userId());
-        // DB가 직접 잔액에 더합니다. 동시에 충전해도 한 요청의 값을 덮어쓰지 않게 합니다.
+        // DB가 현재 잔액에 금액을 더합니다. 여러 서버가 동시에 충전해도 옛 값을 덮어쓰지 않습니다.
         int updated = jdbc.update("UPDATE point_accounts SET balance = balance + ? " +
-                        // 더하기 전에 최대 잔액을 넘는지 검사합니다. ?에는 메서드의 금액 값이 안전하게 들어갑니다.
+                        // 더한 뒤 1조 P를 넘지 않도록 DB가 조건을 검사합니다.
                         "WHERE user_id = ? AND balance <= 1000000000000 - ?",
                 request.amount(), request.userId(), request.amount());
-        // 조건에 맞는 행을 바꾸지 못했다면 한도를 넘는 충전입니다. 409 오류를 보냅니다.
+        // 조건에 맞는 계정이 없으면 충전을 거절하고 트랜잭션을 취소합니다.
         if (updated == 0) {
             throw new ApiException(HttpStatus.CONFLICT, "POINT_LIMIT_EXCEEDED", "Point balance limit exceeded");
         }
-        // 충전 뒤 최종 잔액을 읽어 응답에 넣습니다.
+        // 충전된 새 잔액을 읽어 응답에 담습니다.
         Long balance = jdbc.queryForObject("SELECT balance FROM point_accounts WHERE user_id = ?",
                 Long.class, request.userId());
         return ChargeResponse.builder().userId(request.userId()).balance(balance).build();
@@ -944,7 +903,9 @@ public class PointService {
 }
 ```
 
-### 26. `src/main/java/com/example/coffee/order/dto/OrderRequest.java`
+### 4-5. 주문과 Kafka 발행
+
+#### 26. `src/main/java/com/example/coffee/order/dto/OrderRequest.java`
 
 ```java
 // 이 파일은 order 기능의 dto 패키지에 속합니다.
@@ -958,7 +919,7 @@ import lombok.Builder;
 public record OrderRequest(@Min(1) long userId, @Min(1) long menuId) {}
 ```
 
-### 27. `src/main/java/com/example/coffee/order/dto/OrderResponse.java`
+#### 27. `src/main/java/com/example/coffee/order/dto/OrderResponse.java`
 
 ```java
 // 이 파일은 order 기능의 dto 패키지에 속합니다.
@@ -972,7 +933,7 @@ import lombok.Builder;
 public record OrderResponse(long orderId, long userId, long menuId, long paidAmount, Instant orderedAt) {}
 ```
 
-### 28. `src/main/java/com/example/coffee/order/dto/OrderEvent.java`
+#### 28. `src/main/java/com/example/coffee/order/dto/OrderEvent.java`
 
 ```java
 // 이 파일은 order 기능의 dto 패키지에 속합니다.
@@ -985,10 +946,10 @@ import lombok.Builder;
 public record OrderEvent(long eventId, long orderId, long userId, long menuId, long paidAmount) {}
 ```
 
-### 29. `src/main/java/com/example/coffee/order/controller/OrderController.java`
+#### 29. `src/main/java/com/example/coffee/order/controller/OrderController.java`
 
 ```java
-// 이 파일은 order 기능의 controller 패키지에 속합니다.
+// 주문 HTTP 요청을 받아 Service로 전달하는 입구입니다.
 package com.example.coffee.order.controller;
 
 import com.example.coffee.order.dto.OrderRequest;
@@ -1004,10 +965,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-// 주문 API의 공통 주소는 /api/orders입니다.
 @RequestMapping("/api/orders")
 public class OrderController {
-    // 결제 SQL과 멱등성 규칙은 Service에 둡니다.
     private final OrderService orders;
 
     public OrderController(OrderService orders) {
@@ -1015,19 +974,20 @@ public class OrderController {
     }
 
     @PostMapping
+    // JSON의 userId와 menuId를 OrderRequest로 받고 입력 조건을 검사합니다.
     public ResponseEntity<OrderResponse> place(@Valid @RequestBody OrderRequest request,
-                                               // 같은 결제를 다시 확인할 때 같은 요청 키를 보냅니다.
+                                               // Idempotency-Key는 재시도해도 같은 결제를 가리키게 하는 요청별 이름입니다.
                                                @RequestHeader("Idempotency-Key") String requestKey) {
-        // 서비스가 만든 주문 결과를 HTTP 201로 반환합니다.
+        // 새 주문을 만드는 API이므로 HTTP 201과 주문 결과를 돌려줍니다.
         return ResponseEntity.status(HttpStatus.CREATED).body(orders.place(request, requestKey));
     }
 }
 ```
 
-### 30. `src/main/java/com/example/coffee/order/service/OrderService.java`
+#### 30. `src/main/java/com/example/coffee/order/service/OrderService.java`
 
 ```java
-// 이 파일은 order 기능의 service 패키지에 속합니다.
+// 결제 규칙은 이 서비스에 모읍니다. Controller에는 SQL을 넣지 않습니다.
 package com.example.coffee.order.service;
 
 import com.example.coffee.common.error.ApiException;
@@ -1047,7 +1007,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class OrderService {
-    // JdbcTemplate은 Java에서 SQL을 실행하게 해 주는 Spring 도구입니다.
     private final JdbcTemplate jdbc;
     private final Clock clock;
 
@@ -1056,102 +1015,100 @@ public class OrderService {
         this.clock = clock;
     }
 
-    // 잔액 차감·주문 저장·outbox 저장이 함께 커밋되거나 함께 취소됩니다.
+    // 잔액 차감·주문·outbox 기록이 모두 성공하거나 모두 취소됩니다.
     @Transactional
     public OrderResponse place(OrderRequest request, String requestKey) {
-        // 키가 공백뿐이거나 너무 길면 먼저 400 오류로 거절합니다.
+        // 빈 키나 지나치게 긴 키는 거절합니다. DB 열의 최대 길이도 128입니다.
         if (requestKey.isBlank() || requestKey.length() > 128) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
                     "Idempotency-Key must contain 1 to 128 characters");
         }
-        // 가격은 사용자가 보내지 않고 서버가 DB에서 읽습니다. 사용자가 가격을 낮춰 보내는 일을 막습니다.
+        // 클라이언트가 보낸 가격은 믿지 않고 DB의 메뉴 가격을 읽습니다.
         Long price = jdbc.query("SELECT price FROM menus WHERE id = ?",
                 rs -> rs.next() ? rs.getLong(1) : null, request.menuId());
-        // 없는 메뉴 ID라면 결제하지 않고 404 오류를 돌려줍니다.
+        // 존재하지 않는 메뉴는 결제 전에 404 오류로 끝냅니다.
         if (price == null) {
             throw new ApiException(HttpStatus.NOT_FOUND, "MENU_NOT_FOUND", "Menu does not exist");
         }
-        // 이 사용자의 잔액 행을 잠급니다. 다른 서버가 같은 사용자의 결제를 동시에 진행하면 여기서 기다립니다.
+        // 사용자 잔액 행을 잠급니다. 다른 서버의 같은 사용자 결제가 여기서 기다립니다.
         Long balance = jdbc.query("SELECT balance FROM point_accounts WHERE user_id = ? FOR UPDATE",
                 rs -> rs.next() ? rs.getLong(1) : null, request.userId());
-        // 충전한 계정이 아직 없다면 결제할 포인트가 없으므로 409 오류를 냅니다.
+        // 충전 계정이 없는 사용자는 결제할 포인트가 없습니다.
         if (balance == null) {
             throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
         }
         OrderResponse previous = jdbc.query(
-                // 다른 서버가 같은 키의 주문을 방금 끝냈다면 그 최신 결과를 다시 읽습니다.
+                // 같은 요청 키로 완료된 주문이 있는지 잠금을 잡은 상태에서 확인합니다.
                 "SELECT id, menu_id, paid_amount, ordered_at FROM orders WHERE user_id = ? AND request_key = ? FOR UPDATE",
                 rs -> rs.next() ? OrderResponse.builder()
                         .orderId(rs.getLong("id")).userId(request.userId())
                         .menuId(rs.getLong("menu_id")).paidAmount(rs.getLong("paid_amount"))
                         .orderedAt(rs.getTimestamp("ordered_at").toInstant()).build() : null,
                 request.userId(), requestKey);
-        // 예전 주문을 찾았다면 아래에서는 잔액을 다시 빼지 않습니다.
+        // 이미 처리한 요청이면 새 주문을 만들지 않고 이전 결과를 사용합니다.
         if (previous != null) {
-            // 같은 키로 다른 메뉴를 주문하는 것은 모순이므로 409 오류를 냅니다.
+            // 같은 키를 다른 메뉴 주문에 재사용하면 실수로 보고 409로 거절합니다.
             if (previous.menuId() != request.menuId()) {
                 throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
                         "Idempotency-Key was already used for another menu");
             }
-            // 같은 키로 재시도했다면 다시 결제하지 않고 원래 주문을 돌려줍니다.
+            // 여기로 오면 잔액을 다시 빼지 않습니다. 이것이 결제 요청의 멱등성입니다.
             return previous;
         }
-        // 현재 잔액에서 메뉴 가격을 DB 안에서 뺍니다.
+        // DB 안에서 잔액을 뺍니다. 충분한 포인트가 있을 때만 UPDATE가 성공합니다.
         int debited = jdbc.update("UPDATE point_accounts SET balance = balance - ? " +
-                        // 돈이 충분할 때만 빼는 조건을 같은 UPDATE 문장에 둡니다. 동시 요청이 잔액보다 많이 쓰는 것을 막습니다.
                         "WHERE user_id = ? AND balance >= ?", price, request.userId(), price);
-        // 차감한 행이 없다면 잔액 부족입니다. 예외가 발생하고 이 트랜잭션은 취소됩니다.
+        // 차감한 행이 0개면 돈이 부족하므로 예외를 던져 전체 트랜잭션을 취소합니다.
         if (debited == 0) {
             throw new ApiException(HttpStatus.CONFLICT, "INSUFFICIENT_POINTS", "Insufficient points");
         }
 
-        // 주문 시각을 한 번 정합니다. 주문 행과 outbox가 같은 기준 시각을 사용합니다.
+        // 주문 시각을 한 번 정해 주문 행과 발행 대기 기록에 같이 씁니다.
         Instant now = clock.instant();
-        // DB가 자동으로 만든 주문 번호를 받아올 빈 상자입니다.
+        // DB가 새 주문에 붙인 자동 증가 ID를 나중에 꺼내기 위한 보관함입니다.
         KeyHolder key = new GeneratedKeyHolder();
         jdbc.update(connection -> {
+            // ? 자리에 값을 넣을 INSERT를 준비하고, 새 주문 ID를 돌려달라고 요청합니다.
             PreparedStatement statement = connection.prepareStatement(
-                    // 결제한 주문을 저장합니다. request_key도 함께 저장해야 다음 재시도를 알아볼 수 있습니다.
                     "INSERT INTO orders(user_id, menu_id, paid_amount, ordered_at, request_key) VALUES (?, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, request.userId());
             statement.setLong(2, request.menuId());
-            // ? 자리에 DB에서 읽은 실제 가격을 넣습니다. 문자열을 직접 이어 붙이지 않는 방식입니다.
             statement.setLong(3, price);
             statement.setTimestamp(4, Timestamp.from(now));
             statement.setString(5, requestKey);
             return statement;
         }, key);
-        // 방금 DB가 만든 주문 ID를 꺼냅니다.
+        // 새 주문의 ID를 얻습니다. 다음 outbox 행이 어느 주문의 메시지인지 연결할 때 씁니다.
         long orderId = key.getKey().longValue();
-        // Kafka에 보낼 기록도 같은 트랜잭션에 남깁니다.
+        // Kafka에 보낼 내용을 주문과 같은 DB 트랜잭션에 저장합니다.
         jdbc.update("INSERT INTO order_outbox(order_id, user_id, menu_id, paid_amount, next_attempt_at) " +
                 "VALUES (?, ?, ?, ?, ?)", orderId, request.userId(), request.menuId(), price, Timestamp.from(now));
+        // 결제한 실제 금액과 주문 시각을 HTTP 응답용 객체로 만듭니다.
         return OrderResponse.builder().orderId(orderId).userId(request.userId()).menuId(request.menuId())
                 .paidAmount(price).orderedAt(now).build();
     }
 }
 ```
 
-### 31. `src/main/java/com/example/coffee/order/service/OrderEventSender.java`
+#### 31. `src/main/java/com/example/coffee/order/service/OrderEventSender.java`
 
 ```java
-// 이 파일은 order 기능의 service 패키지에 속합니다.
+// interface는 구현 방법 대신 사용할 메서드의 모양을 정한 약속입니다.
 package com.example.coffee.order.service;
 
 import com.example.coffee.order.dto.OrderEvent;
 
-// 인터페이스는 '이 기능을 제공하라'는 약속입니다. 실제 Kafka 구현과 테스트용 가짜 구현을 바꿔 끼울 수 있습니다.
 public interface OrderEventSender {
-    // 사건을 보내는 약속입니다. Kafka 구현과 테스트용 가짜 구현이 같은 모양을 따릅니다.
+    // outbox는 이 약속에만 의존하므로 테스트에서는 가짜 전송 객체를 넣을 수 있습니다.
     void send(OrderEvent event);
 }
 ```
 
-### 32. `src/main/java/com/example/coffee/order/kafka/KafkaOrderEventSender.java`
+#### 32. `src/main/java/com/example/coffee/order/kafka/KafkaOrderEventSender.java`
 
 ```java
-// 이 파일은 order 기능의 kafka 패키지에 속합니다.
+// OrderEventSender 약속을 Kafka로 실제 전송하는 코드입니다.
 package com.example.coffee.order.kafka;
 
 import com.example.coffee.order.service.OrderEventSender;
@@ -1164,29 +1121,30 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 @Component
-// 위의 발행 약속을 Kafka로 실제 수행하는 클래스입니다.
 public class KafkaOrderEventSender implements OrderEventSender {
-    // Spring Kafka가 제공하는 전송 도구입니다. 문자열 키와 주문 이벤트 값을 보냅니다.
+    // KafkaTemplate은 Spring이 제공하는 Kafka 전송 도구입니다.
     private final KafkaTemplate<String, OrderEvent> kafka;
     private final String topic;
 
     public KafkaOrderEventSender(KafkaTemplate<String, OrderEvent> kafka,
+                                 // 토픽 이름을 application.yml 설정에서 읽습니다.
                                  @Value("${orders.topic}") String topic) {
         this.kafka = kafka;
         this.topic = topic;
     }
 
+    // interface의 send 약속을 이 클래스가 구현한다는 표시입니다.
     @Override
     public void send(OrderEvent event) {
         try {
-            // 사용자 ID를 메시지 키로 씁니다. 같은 사용자의 메시지가 같은 파티션으로 가기 쉽게 합니다.
-            // Kafka가 받았다고 확인할 때까지 최대 5초 기다립니다. 확인 전에는 outbox를 지우면 안 됩니다.
+            // 사용자 ID를 키로 보내 같은 사용자의 메시지가 같은 파티션에 가도록 합니다.
+            // Kafka 확인을 최대 5초 기다립니다. 확인 전에는 outbox 기록을 지우지 않습니다.
             kafka.send(topic, Long.toString(event.userId()), event).get(5, TimeUnit.SECONDS);
         } catch (InterruptedException exception) {
-            // 실행 중단 신호가 오면 그 신호를 잃지 않도록 다시 표시합니다.
+            // 대기 중 중단되었다는 신호를 원래 스레드에 다시 남깁니다.
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Kafka publication interrupted", exception);
-        // Kafka가 실패하거나 5초 동안 답이 없으면 오류를 던져 outbox가 나중에 재시도하게 합니다.
+        // Kafka 오류나 시간 초과를 상위 outbox 작업에 알려 재시도하게 합니다.
         } catch (ExecutionException | TimeoutException exception) {
             throw new IllegalStateException("Kafka publication failed", exception);
         }
@@ -1194,10 +1152,10 @@ public class KafkaOrderEventSender implements OrderEventSender {
 }
 ```
 
-### 33. `src/main/java/com/example/coffee/order/outbox/OutboxPublisher.java`
+#### 33. `src/main/java/com/example/coffee/order/outbox/OutboxPublisher.java`
 
 ```java
-// 이 파일은 order 기능의 outbox 패키지에 속합니다.
+// outbox는 DB에 저장한 'Kafka에 아직 보낼 일' 목록입니다.
 package com.example.coffee.order.outbox;
 
 import com.example.coffee.order.service.OrderEventSender;
@@ -1213,7 +1171,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-// DB에 저장된 발행 대기 사건을 Kafka로 보내는 일을 맡습니다.
 @Service
 public class OutboxPublisher {
     private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
@@ -1228,47 +1185,49 @@ public class OutboxPublisher {
         this.clock = clock;
     }
 
-    // 대기 행을 잡고 삭제하거나 다음 시도를 기록할 때까지 한 DB 트랜잭션으로 처리합니다.
+    // 행을 잡은 상태에서 Kafka 확인까지 기다리고, 성공하면 삭제합니다. 이 동안 DB 잠금이 유지됩니다.
     @Transactional
     public boolean publishOne() {
+        // 재시도할 수 있는 시각이 되었는지 비교할 현재 시각입니다.
         Instant now = clock.instant();
         List<OrderEvent> ready = jdbc.query(
+                // 아직 발행하지 않은 주문 사건 하나를 DB에서 읽습니다.
                 "SELECT id, order_id, user_id, menu_id, paid_amount FROM order_outbox " +
-                        // 지금 보내도 되는 사건 가운데 가장 오래된 한 건을 찾습니다.
-                        // 다른 서버가 이미 잡은 행은 건너뜁니다. 같은 사건을 두 게시기가 동시에 집지 않게 합니다.
+                        // 재시도 대기 시간이 지난 행 가운데 가장 오래된 하나를 선택합니다.
+                        // 다른 서버가 잡은 행은 건너뜁니다. 서버 여러 대가 같은 행을 동시에 보내지 않게 돕습니다.
                         "WHERE next_attempt_at <= ? ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
                 (rs, rowNum) -> OrderEvent.builder()
                         .eventId(rs.getLong("id")).orderId(rs.getLong("order_id"))
                         .userId(rs.getLong("user_id")).menuId(rs.getLong("menu_id"))
                         .paidAmount(rs.getLong("paid_amount")).build(),
                 Timestamp.from(now));
-        // 지금 보낼 사건이 없으면 false를 반환해 반복 작업을 멈춥니다.
+        // 보낼 일이 없다는 뜻으로 false를 반환하면 Scheduler의 반복이 멈춥니다.
         if (ready.isEmpty()) {
             return false;
         }
 
         OrderEvent event = ready.get(0);
         try {
-            // Kafka에 보내고 확인을 기다립니다. 이 동안 DB 행 잠금을 쥐고 있어 오래 걸리면 성능 비용이 있습니다.
+            // Kafka가 받았다는 확인까지 기다립니다. 실패하면 아래 catch로 갑니다.
             sender.send(event);
-            // Kafka 확인을 받았으므로 발행 대기 행을 지웁니다.
+            // 성공을 확인한 사건만 발행 대기 목록에서 지웁니다.
             jdbc.update("DELETE FROM order_outbox WHERE id = ?", event.eventId());
         } catch (RuntimeException exception) {
-            // 전송이 실패하면 시도 횟수를 올리고 5초 뒤 다시 시도하도록 남겨 둡니다.
+            // 실패 횟수를 올리고 다음 시도를 5초 뒤로 미룹니다.
             jdbc.update("UPDATE order_outbox SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ?",
                     Timestamp.from(now.plus(Duration.ofSeconds(5))), event.eventId());
             log.warn("Could not publish order event {}: {}", event.eventId(), exception.toString());
         }
-        // 사건 한 건을 처리했다는 뜻입니다. Kafka 전송에 성공했다는 뜻으로만 해석하면 안 됩니다.
+        // 한 건을 처리했으니 Scheduler가 이어서 다음 건을 확인할 수 있게 합니다.
         return true;
     }
 }
 ```
 
-### 34. `src/main/java/com/example/coffee/order/outbox/OutboxScheduler.java`
+#### 34. `src/main/java/com/example/coffee/order/outbox/OutboxScheduler.java`
 
 ```java
-// 이 파일은 order 기능의 outbox 패키지에 속합니다.
+// 예약 작업을 시작하는 클래스입니다. 발행 규칙은 Publisher에 있습니다.
 package com.example.coffee.order.outbox;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -1276,7 +1235,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 @Component
-// 테스트에서는 자동 발행을 끄고 필요한 순간 직접 publishOne()을 호출할 수 있습니다.
+// 테스트에서 자동 발행을 끄고 원하는 시점에 수동으로 검증할 수 있습니다.
 @ConditionalOnProperty(name = "analytics.publisher.enabled", havingValue = "true", matchIfMissing = true)
 public class OutboxScheduler {
     private final OutboxPublisher publisher;
@@ -1285,10 +1244,10 @@ public class OutboxScheduler {
         this.publisher = publisher;
     }
 
-    // 기본 1초 간격으로 outbox에 보낼 사건이 있는지 확인합니다.
+    // 기본적으로 이전 실행이 끝난 뒤 1초가 지나면 실행합니다.
     @Scheduled(fixedDelayString = "${analytics.publisher.delay-ms:1000}")
     public void publish() {
-        // 보낼 사건이 여러 개면 한 번 깨어난 김에 준비된 것들을 이어서 처리합니다.
+        // 준비된 메시지가 계속 있으면 한 건씩 보내고, 없으면 멈춥니다.
         while (publisher.publishOne()) {
             // Drain the ready queue without waiting for another scheduled run.
         }
@@ -1296,10 +1255,12 @@ public class OutboxScheduler {
 }
 ```
 
-### 35. `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java`
+### 4-6. Kafka 수집
+
+#### 35. `src/main/java/com/example/coffee/analytics/consumer/AnalyticsConsumer.java`
 
 ```java
-// 이 파일은 analytics 기능의 consumer 패키지에 속합니다.
+// Kafka 메시지를 받는 입구입니다. DB 저장은 Service에 맡깁니다.
 package com.example.coffee.analytics.consumer;
 
 import com.example.coffee.analytics.service.AnalyticsService;
@@ -1309,26 +1270,26 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class AnalyticsConsumer {
-    // Kafka에서 받은 메시지의 저장 작업은 서비스에 맡깁니다.
+    // 생성자로 서비스를 받아 Spring이 두 객체를 연결합니다.
     private final AnalyticsService analytics;
 
     public AnalyticsConsumer(AnalyticsService analytics) {
         this.analytics = analytics;
     }
 
-    // Kafka의 orders.paid 메시지가 오면 이 함수를 실행합니다. concurrency=3은 소비자 세 개를 뜻합니다.
+    // orders.paid 토픽을 같은 그룹에서 소비합니다. concurrency=3은 이 인스턴스의 소비자 최대 세 개입니다.
     @KafkaListener(topics = "${orders.topic}", groupId = "coffee-analytics", concurrency = "3")
     public void collect(OrderEvent event) {
-        // 서비스가 DB에 저장한 뒤 돌아오므로, 저장 실패가 Kafka 처리 실패로 이어집니다.
+        // Service가 저장을 마친 뒤 돌아옵니다. 오류가 나면 Kafka 처리도 실패해 재전달될 수 있습니다.
         analytics.collect(event);
     }
 }
 ```
 
-### 36. `src/main/java/com/example/coffee/analytics/service/AnalyticsService.java`
+#### 36. `src/main/java/com/example/coffee/analytics/service/AnalyticsService.java`
 
 ```java
-// 이 파일은 analytics 기능의 service 패키지에 속합니다.
+// 받은 주문 사건을 수집 표에 저장하는 일을 담당합니다.
 package com.example.coffee.analytics.service;
 
 import com.example.coffee.order.dto.OrderEvent;
@@ -1344,19 +1305,22 @@ public class AnalyticsService {
         this.jdbc = jdbc;
     }
 
-    // 메시지 한 건의 저장을 DB 트랜잭션으로 처리합니다. 실패하면 저장 결과를 취소합니다.
+    // 저장 SQL이 실패하면 DB 작업을 취소하고 오류를 소비자까지 전달합니다.
     @Transactional
     public void collect(OrderEvent event) {
-        // 사용자·메뉴·결제액을 실습용 수집 테이블에 보관합니다.
+        // event_id, 주문 번호, 사용자, 메뉴, 결제 금액을 남깁니다.
         jdbc.update("INSERT INTO collected_order_events(event_id, order_id, user_id, menu_id, paid_amount) " +
-                        // 이미 저장한 event_id가 다시 와도 행을 추가하지 않습니다.
+                        // event_id는 기본 키입니다. 같은 Kafka 사건이 다시 오면 두 번째 행을 만들지 않습니다.
                         "VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE event_id = event_id",
+                // ? 다섯 곳에 사건의 값을 순서대로 넣습니다. 문자열 결합보다 안전합니다.
                 event.eventId(), event.orderId(), event.userId(), event.menuId(), event.paidAmount());
     }
 }
 ```
 
-### 37. `src/test/resources/application.yml`
+### 4-7. 테스트와 Git 설정
+
+#### 37. `src/test/resources/application.yml`
 
 ```yaml
 spring:
@@ -1392,7 +1356,7 @@ popularity:
     enabled: false
 ```
 
-### 38. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
+#### 38. `src/test/java/com/example/coffee/CoffeeOrderIntegrationTest.java`
 
 ```java
 package com.example.coffee;
@@ -1773,7 +1737,7 @@ class CoffeeOrderIntegrationTest {
 }
 ```
 
-### 39. `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java`
+#### 39. `src/test/java/com/example/coffee/order/kafka/KafkaOrderEventSenderTest.java`
 
 ```java
 package com.example.coffee.order.kafka;
@@ -1820,7 +1784,7 @@ class KafkaOrderEventSenderTest {
 }
 ```
 
-### 40. `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java`
+#### 40. `src/test/java/com/example/coffee/menu/service/MenuCacheFailureTest.java`
 
 ```java
 package com.example.coffee.menu.service;
@@ -1853,7 +1817,7 @@ class MenuCacheFailureTest {
 }
 ```
 
-### 41. `.gitignore`
+#### 41. `.gitignore`
 
 ```text
 # 빌드 도구가 만든 임시 파일은 Git에 올리지 않습니다.
@@ -1866,27 +1830,24 @@ out/
 *.iml
 ```
 
-## 코드 리뷰를 마치며: 현재 설계의 경계
+## 5. 이 설계의 경계와 개선할 때 볼 곳
 
-- 이 과제에는 로그인·인증이 없다. 사용자가 보낸 `userId`가 정말 그 사용자인지는 확인하지 않는다. 실제 결제 서비스라면 인증이 필요하다.
-- **주문은** 키로 중복 결제를 막지만 **포인트 충전은** 같은 요청을 다시 보내면 또 충전될 수 있다.
-- MySQL의 문자열 비교 규칙에 따라 요청 키 `A`와 `a`가 같은 값처럼 비교될 수 있다. 키 형식이나 DB 비교 규칙을 운영 전에 정해야 한다.
-- Kafka는 로컬에서 브로커 한 대, 토픽 파티션 세 개다. 소비자 세 개가 병렬로 일할 수 있다는 뜻이지 브로커 장애에 안전하다는 뜻은 아니다.
-- 자동 테스트의 H2는 MySQL과 완전히 같지 않다. 특히 잠금과 동시성은 실제 MySQL에서 확인해야 한다. 이 프로젝트는 두 앱 인스턴스에 같은 키로 20건을 보내 같은 주문 한 건이 되는 것을 따로 확인했다.
-- Redis ZSET은 갱신이 늦을 수 있다. 정확한 인기 메뉴 API는 MySQL을 사용한다.
+- 로그인·인증이 없으므로 클라이언트가 보낸 `userId`가 실제 사용자 것인지 확인하지 않는다.
+- 주문에는 요청 키가 있지만 충전에는 없다. 충전 POST를 같은 내용으로 다시 보내면 포인트가 다시 더해진다.
+- 현재 Docker 예시는 Kafka 브로커 1대와 복제본 1개다. 파티션은 3개이고 **인스턴스마다** 소비자 최대 3개를 시작한다. 같은 그룹의 인스턴스를 늘려도 이 토픽에서 동시에 일하는 소비자는 파티션 수인 3개를 넘지 않는다.
+- `OutboxPublisher`는 Kafka 확인을 기다리는 동안 DB 트랜잭션과 행 잠금을 유지한다. 최대 5초 대기이므로 발행량이 많아지면 처리량과 잠금 시간을 다시 측정해야 한다.
+- Redis ZSET은 순위 복사본이다. 현재 인기 메뉴 API가 정확한 횟수를 반환하는 근거는 MySQL 주문 기록이다.
 
-## 이해 확인 문제
+## 6. 직접 확인해 볼 질문
 
-1. `@Transactional`이 없다면 잔액만 빠지고 주문 저장이 실패했을 때 무엇이 남을까?
-2. 10,000P로 4,500P 메뉴를 **같은 키**로 두 번 주문하면 잔액은 얼마이고 주문은 몇 건일까?
-3. 같은 Kafka 사건이 두 번 전달되면 왜 수집 표에는 한 행만 남을까?
-4. Redis ZSET 점수가 3인데 MySQL의 최근 주문이 4건일 수 있는 이유는 무엇일까?
+1. 같은 `Idempotency-Key`로 메뉴 ID만 바꾸면 어느 줄에서 409가 나오는가?
+2. Kafka 전송은 성공했지만 outbox 삭제 전 서버가 꺼졌다면, 어느 코드가 수집 기록의 중복을 막는가?
+3. 왜 `balance = balance - ?` 앞에서 사용자 행을 잠그고, UPDATE에서도 `balance >= ?`를 확인하는가?
+4. 7일이 지나면 인기 메뉴 수가 줄어야 한다. Redis 점수를 주문할 때마다 1씩 올리기만 하면 왜 틀릴 수 있는가?
 
-**확인:** 1) 부분 결제 위험, 2) 5,500P와 1건, 3) `event_id` 기본키와 중복 처리 SQL, 4) ZSET의 주기적 갱신 지연.
+## 원본 확인용 SHA-256
 
-## 원본 코드 확인용 SHA-256
-
-해시는 **주석을 붙이기 전 원본 파일**의 값이다. 이 문서를 만든 뒤 원본 코드를 바꾸면 주석이 설명하는 줄도 다시 확인해야 한다.
+아래 해시는 설명 주석을 제외한 **실제 파일**의 SHA-256이다. 소스가 바뀌면 이 문서도 다시 확인해야 한다.
 
 | 파일 | SHA-256 |
 | --- | --- |
