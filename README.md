@@ -4,15 +4,24 @@ Java 17, Spring Boot 3.5.7, MySQL 8.4, Apache Kafka 4.1.2, Redis 7.4 기반의 �
 
 ## 실행
 
+프로젝트 폴더에서 JDK 17과 Docker를 준비한 뒤 실행합니다.
+
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
-& 'C:\Users\souls\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe' compose up -d --wait
+docker compose up -d --wait
 .\gradlew.bat bootRun
 ```
 
-JDK 17과 Docker가 필요합니다. 위 `JAVA_HOME` 경로는 로컬 설치 위치에 맞게 바꿉니다. Gradle Wrapper를 처음 실행할 때는 Gradle 배포 파일과 의존성을 다운로드할 인터넷 연결이 필요합니다. Compose는 개발용 MySQL, 단일 Kafka 브로커, Redis를 실행합니다. 기본 DB 주소는 `localhost:13306/coffee`, 사용자/비밀번호는 `coffee/coffee`입니다. `DB_URL`, `DB_USER`, `DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `REDIS_HOST`, `REDIS_PORT` 환경 변수로 연결 주소를 변경할 수 있습니다. `./gradlew test` 또는 Windows에서 `.\gradlew.bat test`로 테스트합니다.
+Windows에서 JDK 17이 기본 Java가 아니라면 먼저 `JAVA_HOME`을 설치된 JDK 17 경로로 지정합니다. macOS·Linux에서는 `./gradlew bootRun`을 사용합니다. Gradle Wrapper를 처음 실행할 때는 Gradle 배포 파일과 의존성을 다운로드할 인터넷 연결이 필요합니다. Compose는 개발용 MySQL, 단일 Kafka 브로커, Redis를 실행합니다. 기본 DB 주소는 `localhost:13306/coffee`, 사용자/비밀번호는 `coffee/coffee`입니다. `DB_URL`, `DB_USER`, `DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `REDIS_HOST`, `REDIS_PORT` 환경 변수로 연결 주소를 변경할 수 있습니다. 테스트는 Windows에서 `.\gradlew.bat test`, macOS·Linux에서 `./gradlew test`로 실행합니다. 데모용 `compose.yaml`의 비밀번호는 운영 환경에서 교체해야 합니다.
 
-초기 메뉴는 Flyway 마이그레이션에서 4개를 등록합니다. 데모용 `compose.yaml`의 비밀번호는 운영 환경에서 교체해야 합니다.
+## DB 초기화: Flyway
+
+Flyway는 애플리케이션 시작 시 `src/main/resources/db/migration`의 SQL을 버전 순서대로 실행하고, 적용한 버전을 DB에 기록합니다. `V1__init.sql`은 테이블과 초기 메뉴 4개를 만들고, `V2__collected_order_events.sql`은 Kafka 수집 테이블을, `V3__order_idempotency.sql`은 주문 요청 키와 고유 인덱스를 추가합니다. 이미 적용한 파일을 수정하기보다 다음 버전의 SQL 파일을 추가합니다.
+
+## 학습 문서
+
+- [전체 코드 리뷰](docs/COFFEE_ORDER_CODE_REVIEW.md): API부터 DB·Kafka·Redis까지 실행 흐름
+- [Redis 코드 리뷰](docs/COFFEE_ORDER_REDIS_CODE_REVIEW.md): 메뉴 캐시와 ZSET 순위 복사본
+- [Kafka 코드 리뷰](docs/COFFEE_ORDER_KAFKA_CODE_REVIEW.md): outbox, 발행, 수집과 중복 처리
 
 ## 패키지 구조
 
@@ -91,8 +100,8 @@ Idempotency-Key: order-1
 erDiagram
     MENUS ||--o{ ORDERS : ordered
     POINT_ACCOUNTS ||--o{ ORDERS : pays
-    ORDERS ||--|| ORDER_OUTBOX : emits
-    ORDER_OUTBOX ||--o| COLLECTED_ORDER_EVENTS : delivered
+    ORDERS ||--o| ORDER_OUTBOX : pending
+    ORDERS ||--o| COLLECTED_ORDER_EVENTS : reported
     MENUS {
         BIGINT id PK
         VARCHAR name UK
@@ -104,15 +113,15 @@ erDiagram
     }
     ORDERS {
         BIGINT id PK
-        BIGINT user_id FK
-        BIGINT menu_id FK
+        BIGINT user_id
+        BIGINT menu_id
         BIGINT paid_amount
         TIMESTAMP ordered_at
         VARCHAR request_key
     }
     ORDER_OUTBOX {
         BIGINT id PK
-        BIGINT order_id FK,UK
+        BIGINT order_id UK
         BIGINT user_id
         BIGINT menu_id
         BIGINT paid_amount
@@ -129,16 +138,20 @@ erDiagram
     }
 ```
 
-`orders.paid_amount`는 결제 당시 가격을 보존합니다. `collected_order_events`는 데이터 수집 플랫폼을 흉내 낸 수신 테이블이며, `event_id` 고유키로 중복 전송을 한 번만 반영합니다. 메뉴 가격이 나중에 바뀌어도 과거 주문 금액은 변하지 않습니다. `orders(ordered_at, menu_id)` 인덱스는 최근 7일 조회 범위를 좁힙니다. `orders(user_id, request_key)`의 고유 인덱스는 여러 인스턴스에 걸친 결제 요청 키 중복을 막습니다. V3 마이그레이션에서 기존 주문을 보존하기 위해 과거 행의 `request_key`는 NULL을 허용하고, 새 API 주문은 항상 키를 저장합니다.
+ERD의 선은 코드가 사용하는 **논리적 관계**입니다. 현재 V1 마이그레이션은 열 정의 안에 `REFERENCES`를 적었지만 [MySQL 8.4는 이 형식을 무시합니다](https://dev.mysql.com/doc/refman/8.4/en/create-table.html). 따라서 실제 외래 키 제약은 생성되지 않습니다. 외래 키 검증이 필요하면 별도 `FOREIGN KEY (...) REFERENCES ...` 구문을 새 마이그레이션에 추가해야 합니다.
+
+outbox 행은 전송 성공 후 삭제되므로 주문과의 관계가 항상 1:1은 아닙니다. `collected_order_events`는 데이터 수집 플랫폼을 흉내 낸 수신 테이블이며, `event_id` 기본 키로 재전달된 이벤트의 중복 저장을 막습니다.
+
+`orders.paid_amount`는 결제 당시 가격을 보존하므로 메뉴 가격이 나중에 바뀌어도 과거 주문 금액은 변하지 않습니다. `orders(ordered_at, menu_id)` 인덱스는 최근 7일 조회 범위를 좁힙니다. `orders(user_id, request_key)`의 고유 인덱스는 여러 인스턴스에 걸친 결제 요청 키 중복을 막습니다. V3 마이그레이션에서 기존 주문을 보존하기 위해 과거 행의 `request_key`는 NULL을 허용하고, 새 API 주문은 항상 키를 저장합니다.
 
 ## 설계 의도와 문제 해결 전략
 
 1. **공유 MySQL을 정확성의 기준으로 사용합니다.** 잔액과 주문 수를 Redis에 따로 보관하면 DB와 값이 어긋날 수 있습니다. Redis는 메뉴 목록을 5분 동안 캐시하고, 최근 7일 메뉴별 주문 수를 `popular:7d:counts` ZSET에 10초마다 투영합니다. 메뉴 ID가 멤버, 주문 수가 점수이며 임시 키 작성 후 원자적으로 이름을 바꿉니다. ZSET은 10초 주기로 갱신되며 일시적으로 이전 집계를 보여줄 수 있으므로 정확한 인기 메뉴 API는 계속 MySQL을 조회합니다. Redis가 일시적으로 실패하면 메뉴 목록은 DB에서 읽습니다. 인기 메뉴는 확정된 `orders`에서 직접 `COUNT`하므로 Kafka 전송 지연이나 캐시 갱신 실패가 순위를 왜곡하지 않습니다.
 2. **포인트 변경과 주문 재시도를 MySQL 행 잠금으로 직렬화합니다.** 충전은 계정 생성 후 `balance = balance + amount`, 주문은 `balance >= price` 조건이 있는 `UPDATE`로 차감합니다. 주문은 사용자 포인트 계정 행을 `FOR UPDATE`로 잠근 뒤 동일 요청 키의 기존 주문을 잠금 읽기로 확인합니다. MySQL 기본 `REPEATABLE READ`에서 일반 조회가 오래된 스냅샷을 볼 수 있어 기존 주문도 `FOR UPDATE`로 읽습니다. 같은 키·메뉴면 최초 응답을 재생하고, 다른 메뉴면 409를 반환합니다. 서버 내부 락 없이 여러 인스턴스에서 초과 차감과 중복 결제를 막습니다.
 3. **잔액 차감, 주문, 전송 대기 이벤트를 한 DB 트랜잭션으로 묶습니다.** 어느 SQL이 실패해도 모두 롤백합니다. Kafka 장애가 결제를 실패시키지 않도록 토픽 발행은 커밋 후 outbox 게시기가 수행합니다.
-4. **실시간 전송은 1초 간격의 outbox 폴링으로 구현합니다.** 준비된 이벤트는 곧바로 연속 처리합니다. `FOR UPDATE SKIP LOCKED`로 여러 게시 인스턴스가 같은 대기 행을 동시에 집지 않도록 합니다. 게시기는 Kafka 브로커 확인을 최대 5초 기다리고, 실패 시 5초 뒤 재시도합니다. 확인 직후 DB 커밋 전에 서버가 중단되면 중복 발행될 수 있으므로 전달 보장은 **at least once**입니다. 수집 컨슈머는 `eventId` 고유키로 중복 제거합니다.
+4. **주문 이벤트 전송은 기본 1초 간격의 outbox 폴링으로 시작합니다.** 준비된 이벤트는 곧바로 연속 처리하지만, 서버 부하·Kafka 장애·재시도 중에는 전송이 더 늦어질 수 있습니다. `FOR UPDATE SKIP LOCKED`로 여러 게시 인스턴스가 같은 대기 행을 동시에 집지 않도록 합니다. 게시기는 Kafka 브로커 확인을 최대 5초 기다리고, 실패 시 5초 뒤 재시도합니다. 확인 직후 DB 커밋 전에 서버가 중단되면 중복 발행될 수 있으므로 전달 보장은 **at least once**입니다. 수집 컨슈머는 `eventId` 고유키로 중복 제거합니다.
 
-Kafka 토픽은 `orders.paid`이며 3개 파티션을 사용합니다. 메시지 키는 `userId`, 값은 `{eventId, orderId, userId, menuId, paidAmount}` JSON입니다. 같은 사용자의 이벤트는 같은 파티션으로 보내 순서를 유지합니다. `coffee-analytics` 소비자 그룹은 한 앱 인스턴스에서 3개 컨슈머를 시작해 각 파티션을 병렬 처리합니다. 앱을 2개 띄우면 컨슈머 클라이언트는 6개가 되지만 파티션을 맡아 실제 처리하는 컨슈머는 3개입니다. 같은 `Idempotency-Key`로 주문 POST를 재시도하면 기존 주문을 반환합니다. 새 결제를 의도할 때는 새 키를 사용합니다.
+Kafka 토픽은 `orders.paid`이며 3개 파티션을 사용합니다. 메시지 키는 `userId`, 값은 `{eventId, orderId, userId, menuId, paidAmount}` JSON입니다. 같은 사용자 ID를 Kafka 키로 사용해 같은 파티션으로 보냅니다. 다만 여러 outbox 게시기가 병렬로 발행하면 원래 주문 순서대로 Kafka에 기록된다고 보장할 수는 없습니다. `coffee-analytics` 소비자 그룹은 한 앱 인스턴스에서 3개 컨슈머를 시작해 각 파티션을 병렬 처리합니다. 앱을 2개 띄우면 컨슈머 클라이언트는 6개가 되지만 파티션을 맡아 실제 처리하는 컨슈머는 3개입니다. 같은 `Idempotency-Key`로 주문 POST를 재시도하면 기존 주문을 반환합니다. 새 결제를 의도할 때는 새 키를 사용합니다.
 
 ## 기술 선택 이유
 
